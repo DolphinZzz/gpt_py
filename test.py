@@ -4,9 +4,11 @@ import getpass
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 import uuid
+import webbrowser
 from pathlib import Path
 from typing import Any, cast
 from urllib.parse import parse_qs, urlencode
@@ -46,8 +48,8 @@ DEFAULT_CHECKOUT_PAYLOAD = {
 }
 
 # Startup hardcoded defaults (as requested)
-HARDCODED_EMAIL = "irecx6v1z3n@duckmail.sbs"
-HARDCODED_PASSWORD = "I#RAgGk%RE1528"
+HARDCODED_EMAIL = "nwkl9ppecqs7@duckmail.sbs"
+HARDCODED_PASSWORD = "0A5NpOduc*ruZ2"
 HARDCODED_PROXY = "socks5h://127.0.0.1:7897"
 
 
@@ -73,6 +75,100 @@ def _parse_form_data(raw: str):
         return {k: (v[0] if len(v) == 1 else v) for k, v in q.items()}
     except Exception:
         return {"raw": raw}
+
+# 使用韩国画像
+def _open_url_visible_default(
+    url: str,
+    wait_ms: int = 25000,
+    screenshot_file: str = "checkout_headless_kr.png",
+    keep_open: bool = False,
+) -> dict:
+    target = str(url or "").strip()
+    if not target:
+        return {"ok": False, "error": "empty url"}
+
+    launch_kwargs: dict[str, Any] = {"headless": False}
+    if sys.platform.startswith("linux"):
+        launch_kwargs["args"] = _linux_launch_args()
+    if os.name == "nt":
+        launch_kwargs["channel"] = "chrome"
+
+    try:
+        with sync_playwright() as p:
+            try:
+                browser = p.chromium.launch(**launch_kwargs)
+            except Exception:
+                fallback: dict[str, Any] = {"headless": False}
+                if sys.platform.startswith("linux"):
+                    fallback["args"] = _linux_launch_args()
+                browser = p.chromium.launch(**fallback)
+            context = browser.new_context()
+            page = context.new_page()
+            page.on("requestfailed", lambda req: print(f"[pw][requestfailed] {req.method} {req.url} -> {req.failure}"))
+            page.on("console", lambda msg: print(f"[pw][console][{msg.type}] {msg.text}"))
+            page.on("pageerror", lambda err: print(f"[pw][pageerror] {err}"))
+            page.on("popup", lambda pop: print(f"[pw][popup] {pop.url}"))
+
+            resp = page.goto(target, wait_until="domcontentloaded", timeout=90000)
+            try:
+                page.wait_for_load_state("networkidle", timeout=30000)
+            except Exception:
+                pass
+            page.wait_for_timeout(max(0, int(wait_ms)))
+            shot = str(Path(screenshot_file).resolve())
+            try:
+                page.screenshot(path=shot, full_page=True)
+            except Exception:
+                shot = ""
+            result = {
+                "ok": True,
+                "method": "playwright_headed_default",
+                "status": (resp.status if resp else None),
+                "final_url": page.url,
+                "title": page.title(),
+                "screenshot": shot,
+            }
+            if keep_open:
+                print("[action] 浏览器已打开，按回车后关闭浏览器并继续...")
+                try:
+                    input()
+                except Exception:
+                    pass
+            context.close()
+            browser.close()
+            return result
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+def _open_url_in_system_browser(url: str) -> dict:
+    target = str(url or "").strip()
+    if not target:
+        return {"ok": False, "error": "empty url"}
+
+    candidates = [
+        os.environ.get("CHROME_PATH", "").strip(),
+        "chrome",
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+    ]
+    for cmd in candidates:
+        if not cmd:
+            continue
+        if os.path.isabs(cmd) and not os.path.exists(cmd):
+            continue
+        try:
+            subprocess.Popen([cmd, target], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return {"ok": True, "method": "system_chrome", "cmd": cmd}
+        except Exception:
+            continue
+
+    try:
+        if webbrowser.open(target, new=2):
+            return {"ok": True, "method": "system_default"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+    return {"ok": False, "error": "cannot open system browser"}
 
 
 def _try_click_first(page, candidates: list[str], timeout_ms: int = 6000) -> bool:
@@ -183,7 +279,10 @@ def _protocol_login_session(email: str, password: str, proxy: str | None, mail_t
     reg._print("[capture] trying protocol login via chatgpt_register")
     tokens = reg.perform_codex_oauth_login_http(email=email, password=password, mail_token=mail_token or "")
     if not isinstance(tokens, dict) or not tokens.get("access_token"):
-        return None, None, "protocol login failed"
+        hint = ""
+        if not (mail_token or "").strip():
+            hint = "; hint: pass --mail-token or set MAIL_TOKEN for OAuth email OTP"
+        return None, None, f"protocol login failed{hint}"
     return reg, tokens, "ok"
 
 
@@ -855,7 +954,8 @@ def _run_protocol_only(
     browser_state_file: Path,
     no_auth_cache: bool,
     refresh_auth: bool,
-    no_browser_capture: bool,
+    skip_runtime_capture: bool,
+    stripe_open_mode: str,
 ):
     reg, tokens, msg = _protocol_login_session_with_cache(
         email=email,
@@ -961,11 +1061,27 @@ def _run_protocol_only(
             print(f"[ok] protocol stripe_init status={init_resp.status_code}")
             if stripe_hosted_url:
                 print(f"[ok] stripe hosted url: {stripe_hosted_url}")
+                if (stripe_open_mode or "").strip().lower() == "system":
+                    stripe_open_res = _open_url_in_system_browser(stripe_hosted_url)
+                else:
+                    stripe_open_res = _open_url_visible_default(
+                        stripe_hosted_url,
+                        wait_ms=25000,
+                        screenshot_file="stripe_headed_kr.png",
+                        keep_open=True,
+                    )
+                if stripe_open_res.get("ok"):
+                    print(
+                        f"[ok] opened stripe hosted url "
+                        f"method={stripe_open_res.get('method')} status={stripe_open_res.get('status')} final={stripe_open_res.get('final_url')}"
+                    )
+                else:
+                    print(f"[warn] failed to open stripe hosted url: {stripe_open_res.get('error')}")
         except Exception as e:
             init_result = {"ok": False, "error": str(e)}
             print(f"[error] protocol stripe_init failed: {e}")
 
-        if not no_browser_capture:
+        if not skip_runtime_capture:
             print("[info] 接下来会打开真实浏览器，请手动输入卡号/CVC并点击支付")
             runtime_capture = _auto_capture_stripe_from_checkout(
                 proxy=proxy,
@@ -975,8 +1091,8 @@ def _run_protocol_only(
                 max_wait_ms=max_wait_ms,
             )
         else:
-            payment_method_result = {"ok": False, "reason": "skipped (--no-browser-capture)"}
-            stripe_result = {"ok": False, "reason": "skipped (--no-browser-capture)"}
+            payment_method_result = {"ok": False, "reason": "skipped (--skip-runtime-capture)"}
+            stripe_result = {"ok": False, "reason": "skipped (--skip-runtime-capture)"}
 
             latest = (runtime_capture.get("latest") or {}) if isinstance(runtime_capture, dict) else {}
             runtime_params = _extract_runtime_params(latest if isinstance(latest, dict) else {})
@@ -1438,9 +1554,25 @@ def main():
         help="Playwright browser storage state file for logged-in session",
     )
     parser.add_argument(
+        "--skip-runtime-capture",
+        action="store_true",
+        help="Skip runtime browser capture for payment_methods/confirm",
+    )
+    parser.add_argument(
+        "--stripe-open-mode",
+        choices=["playwright", "system"],
+        default="playwright",
+        help="How to open stripe hosted url: playwright or system browser",
+    )
+    parser.add_argument(
         "--no-browser-capture",
         action="store_true",
-        help="Only run protocol requests and fetch checkout .data route, do not open browser capture",
+        help="Deprecated alias of --skip-runtime-capture",
+    )
+    parser.add_argument(
+        "--stripe-system-browser",
+        action="store_true",
+        help="Deprecated alias of --stripe-open-mode system",
     )
     args = parser.parse_args()
 
@@ -1456,7 +1588,10 @@ def main():
         args.password = HARDCODED_PASSWORD
         args.proxy = HARDCODED_PROXY or proxy_default
         args.output = args.output or "checkout_capture.json"
-        args.no_browser_capture = True
+        # 是否抓包
+        args.skip_runtime_capture = True
+        # playwright | system
+        args.stripe_open_mode = "system"
         print(f"[info] using hardcoded email={args.email} proxy={args.proxy}")
     else:
         if not args.email:
@@ -1468,6 +1603,11 @@ def main():
         raise SystemExit("Missing email/password")
 
     proxy = (args.proxy or proxy_default).strip() or None
+
+    if bool(args.no_browser_capture):
+        args.skip_runtime_capture = True
+    if bool(args.stripe_system_browser):
+        args.stripe_open_mode = "system"
 
     out_file = Path(args.output).resolve()
     if args.protocol_only:
@@ -1486,7 +1626,8 @@ def main():
             browser_state_file=Path(args.browser_state_file).resolve(),
             no_auth_cache=bool(args.no_auth_cache),
             refresh_auth=bool(args.refresh_auth),
-            no_browser_capture=bool(args.no_browser_capture),
+            skip_runtime_capture=bool(args.skip_runtime_capture),
+            stripe_open_mode=str(args.stripe_open_mode),
         )
         return
 

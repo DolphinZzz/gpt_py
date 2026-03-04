@@ -925,6 +925,12 @@ class ChatGPTRegister:
             except Exception:
                 pass
 
+    def _json_or_none(self, resp):
+        try:
+            return resp.json()
+        except Exception:
+            return None
+
     # ==================== DuckMail 临时邮箱 ====================
 
     def _create_duckmail_session(self):
@@ -1097,13 +1103,27 @@ class ChatGPTRegister:
 
     def get_csrf(self) -> str:
         url = f"{self.BASE}/api/auth/csrf"
-        r = self.session.get(url, headers={"Accept": "application/json", "Referer": f"{self.BASE}/"})
-        data = r.json()
-        token = data.get("csrfToken", "")
-        self._log("1. Get CSRF", "GET", url, r.status_code, data)
-        if not token:
-            raise Exception("Failed to get CSRF token")
-        return token
+        last_status = None
+        last_body = ""
+        for attempt in range(1, 4):
+            r = self.session.get(
+                url,
+                headers={"Accept": "application/json", "Referer": f"{self.BASE}/"},
+                timeout=20,
+            )
+            data = self._json_or_none(r)
+            token = data.get("csrfToken", "") if isinstance(data, dict) else ""
+            self._log("1. Get CSRF", "GET", url, r.status_code, data or {"text": r.text[:300]})
+            if token:
+                return token
+
+            last_status = r.status_code
+            last_body = (r.text or "")[:300]
+            if attempt < 3:
+                self._print(f"[warn] csrf empty/non-json, retry {attempt}/3")
+                time.sleep(1.0 * attempt)
+
+        raise Exception(f"Failed to get CSRF token (status={last_status}, body={last_body})")
 
     def signin(self, email: str, csrf: str) -> str:
         url = f"{self.BASE}/api/auth/signin/openai"
@@ -1116,12 +1136,14 @@ class ChatGPTRegister:
         r = self.session.post(url, params=params, data=form_data, headers={
             "Content-Type": "application/x-www-form-urlencoded",
             "Accept": "application/json", "Referer": f"{self.BASE}/", "Origin": self.BASE,
-        })
-        data = r.json()
+        }, timeout=20)
+        data = self._json_or_none(r)
+        if not isinstance(data, dict):
+            data = {"text": r.text[:500]}
         authorize_url = data.get("url", "")
         self._log("2. Signin", "POST", url, r.status_code, data)
         if not authorize_url:
-            raise Exception("Failed to get authorize URL")
+            raise Exception(f"Failed to get authorize URL (status={r.status_code}, body={(r.text or '')[:300]})")
         return authorize_url
 
     def authorize(self, url: str) -> str:

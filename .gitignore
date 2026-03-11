@@ -1,0 +1,21 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# 运行结果目录
+results/
+
+# 缓存/状态文件（你图里标的）
+auth_cache.json
+browser_state.json
+
+# 结账/抓取输出（你图里相关的）
+checkout_capture.json
+
+# 所有 png 图片
+*.png
+
+# （可选）如果你也想忽略所有运行产物 json，可打开下面这行
+# *.json

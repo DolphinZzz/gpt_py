@@ -1,4 +1,4 @@
-import argparse
+﻿import argparse
 import base64
 import getpass
 import json
@@ -48,8 +48,9 @@ DEFAULT_CHECKOUT_PAYLOAD = {
 }
 
 # Startup hardcoded defaults (as requested)
-HARDCODED_EMAIL = "nwkl9ppecqs7@duckmail.sbs"
-HARDCODED_PASSWORD = "0A5NpOduc*ruZ2"
+HARDCODED_EMAIL = "wsty1rok71g@duckmail.sbs"
+HARDCODED_PASSWORD = "waFs8Ln6mV$BF$"
+HARDCODED_MAIL_PASSWORD = "xPsA3*Fnt7o&5N"
 HARDCODED_PROXY = "socks5h://127.0.0.1:7897"
 
 
@@ -255,10 +256,63 @@ def _extract_curl_cookies(session) -> list[dict]:
     return result
 
 
-def _protocol_login_bootstrap(context, email: str, password: str, proxy: str | None, mail_token: str | None):
+def _try_fetch_duckmail_token(email: str, mail_password: str, proxy: str | None) -> str | None:
+    email_text = str(email or "").strip()
+    password_text = str(mail_password or "").strip()
+    if not email_text.lower().endswith("@duckmail.sbs") or not password_text:
+        return None
+
+    api_base = str(getattr(chatgpt_register, "DUCKMAIL_API_BASE", "") or "").strip().rstrip("/")
+    if not api_base:
+        return None
+
+    session_factory = getattr(chatgpt_register, "_create_duckmail_session", None)
+    if not callable(session_factory):
+        return None
+
+    session = session_factory()
+    if proxy:
+        try:
+            session.proxies = {"http": proxy, "https": proxy}
+        except Exception:
+            pass
+
+    try:
+        resp = session.post(
+            f"{api_base}/token",
+            json={"address": email_text, "password": password_text},
+            timeout=15,
+            impersonate="chrome131",
+        )
+        if resp.status_code != 200:
+            print(f"[warn] duckmail token fetch failed: status={resp.status_code}")
+            return None
+        data = resp.json()
+        token = str(data.get("token") or "").strip()
+        if token:
+            print("[ok] duckmail mail_token fetched automatically")
+            return token
+    except Exception as e:
+        print(f"[warn] duckmail token fetch failed: {e}")
+    return None
+
+
+def _protocol_login_bootstrap(
+    context,
+    email: str,
+    password: str,
+    proxy: str | None,
+    mail_token: str | None,
+    mail_password: str | None,
+):
+    effective_mail_token = (mail_token or "").strip() or _try_fetch_duckmail_token(
+        email=email,
+        mail_password=mail_password or password,
+        proxy=proxy,
+    ) or ""
     reg = chatgpt_register.ChatGPTRegister(proxy=proxy or "", tag="capture")
     reg._print("[capture] trying protocol login via chatgpt_register")
-    tokens = reg.perform_codex_oauth_login_http(email=email, password=password, mail_token=mail_token or "")
+    tokens = reg.perform_codex_oauth_login_http(email=email, password=password, mail_token=effective_mail_token)
     if not isinstance(tokens, dict) or not tokens.get("access_token"):
         return False, "protocol login failed"
 
@@ -274,7 +328,16 @@ def _protocol_login_bootstrap(context, email: str, password: str, proxy: str | N
     return True, "ok"
 
 
-def _protocol_login_session(email: str, password: str, proxy: str | None, mail_token: str | None):
+def _protocol_login_session(
+    email: str,
+    password: str,
+    proxy: str | None,
+    mail_token: str | None,
+    mail_password: str | None,
+):
+    if not (mail_token or "").strip():
+        mail_token = _try_fetch_duckmail_token(email=email, mail_password=mail_password or password, proxy=proxy)
+
     reg = chatgpt_register.ChatGPTRegister(proxy=proxy or "", tag="capture")
     reg._print("[capture] trying protocol login via chatgpt_register")
     tokens = reg.perform_codex_oauth_login_http(email=email, password=password, mail_token=mail_token or "")
@@ -345,6 +408,7 @@ def _protocol_login_session_with_cache(
     password: str,
     proxy: str | None,
     mail_token: str | None,
+    mail_password: str | None,
     cache_file: Path,
     no_cache: bool,
     refresh_auth: bool,
@@ -366,7 +430,13 @@ def _protocol_login_session_with_cache(
             print(f"[ok] auth cache loaded <- {cache_file}")
             return reg, (cache.get("tokens") or {}), "ok(cache)"
 
-    reg, tokens, msg = _protocol_login_session(email=email, password=password, proxy=proxy, mail_token=mail_token)
+    reg, tokens, msg = _protocol_login_session(
+        email=email,
+        password=password,
+        proxy=proxy,
+        mail_token=mail_token,
+        mail_password=mail_password,
+    )
     if reg and isinstance(tokens, dict) and tokens.get("access_token") and not no_cache:
         _save_auth_cache(cache_file, email=email, tokens=tokens, cookies=_extract_curl_cookies(reg.session))
     return reg, tokens, msg
@@ -950,6 +1020,7 @@ def _run_protocol_only(
     stripe_confirm_payload_b64: str,
     max_wait_ms: int,
     mail_token: str | None,
+    mail_password: str | None,
     auth_cache_file: Path,
     browser_state_file: Path,
     no_auth_cache: bool,
@@ -962,6 +1033,7 @@ def _run_protocol_only(
         password=password,
         proxy=proxy,
         mail_token=mail_token,
+        mail_password=mail_password,
         cache_file=auth_cache_file,
         no_cache=no_auth_cache,
         refresh_auth=refresh_auth,
@@ -1293,6 +1365,7 @@ def _run(
     replay_stripe_confirm: bool,
     stripe_confirm_payload_b64: str | None,
     mail_token: str | None,
+    mail_password: str | None,
 ):
     # 强制无头，不弹窗，适配 Linux 服务器
     launch_kwargs = {"headless": True, "args": _linux_launch_args()}
@@ -1371,6 +1444,7 @@ def _run(
             password=password,
             proxy=proxy,
             mail_token=mail_token,
+            mail_password=mail_password,
         )
         if protocol_ok:
             print("[ok] protocol login bootstrap success")
@@ -1485,6 +1559,7 @@ def main():
     parser = argparse.ArgumentParser(description="Headless Playwright: login and capture checkout request chain")
     parser.add_argument("--email", default=os.environ.get("OPENAI_EMAIL", ""), help="Login email")
     parser.add_argument("--password", default=os.environ.get("OPENAI_PASSWORD", ""), help="Login password")
+    parser.add_argument("--mail-password", default=os.environ.get("MAIL_PASSWORD", ""), help="Mailbox password for fetching DuckMail mail_token")
     parser.add_argument("--output", default="checkout_capture.json", help="Output JSON path")
     parser.add_argument("--max-wait-ms", type=int, default=600000, help="Max capture wait time after trigger")
     parser.add_argument("--proxy", default="", help="Optional proxy url like socks5h://127.0.0.1:1080")
@@ -1586,6 +1661,7 @@ def main():
     if interactive:
         args.email = HARDCODED_EMAIL
         args.password = HARDCODED_PASSWORD
+        args.mail_password = HARDCODED_MAIL_PASSWORD or args.mail_password
         args.proxy = HARDCODED_PROXY or proxy_default
         args.output = args.output or "checkout_capture.json"
         # 是否抓包
@@ -1622,6 +1698,7 @@ def main():
             stripe_confirm_payload_b64=(args.stripe_confirm_payload_b64 or "").strip(),
             max_wait_ms=args.max_wait_ms,
             mail_token=(args.mail_token or "").strip() or None,
+            mail_password=(args.mail_password or "").strip() or None,
             auth_cache_file=Path(args.auth_cache_file).resolve(),
             browser_state_file=Path(args.browser_state_file).resolve(),
             no_auth_cache=bool(args.no_auth_cache),
@@ -1644,8 +1721,10 @@ def main():
             replay_stripe_confirm=not args.no_replay_stripe_confirm,
             stripe_confirm_payload_b64=(args.stripe_confirm_payload_b64 or "").strip() or None,
             mail_token=(args.mail_token or "").strip() or None,
+            mail_password=(args.mail_password or "").strip() or None,
         )
 
 
 if __name__ == "__main__":
     main()
+

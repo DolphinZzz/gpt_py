@@ -1,7 +1,7 @@
 {
   "total_accounts": 3,
   "duckmail_api_base": "https://api.duckmail.sbs",
-  "duckmail_bearer": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoiMzFjZjU4ZDQ0MTlhNTYwYTY2NzU2MTQ4MWZjY2JhMmQiLCJhZGRyZXNzIjoiNFFzcXhDVnVoU0BkdWNrbWFpbC5zYnMiLCJhdXRoX3R5cGUiOiJlbWFpbCIsImV4cCI6MjA4NzgwMjIwMywiaWF0IjoxNzcyNDQyMjAzfQ.36iaRRnSQW7MAnCdACuJzzlmwApTnoajIN3u9O_rxAI",
+  "duckmail_bearer": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoiMTYxZjhjNjkzNTZiOTZkOTg1MjRlNjA5ZmY2ZWVjZmUiLCJhZGRyZXNzIjoiVnhCTE11bW1RaEBkdWNrbWFpbC5zYnMiLCJhdXRoX3R5cGUiOiJlbWFpbCIsImV4cCI6MTgwNDczNjY5MCwiaWF0IjoxNzczMjAwNjkwfQ.5N9Uios5B2AinnzicIIE0YESZwOhxipqp570OuJgfck",
   "proxy": "socks5h://127.0.0.1:1080",
   "output_file": "registered_accounts.txt",
   "enable_oauth": true,

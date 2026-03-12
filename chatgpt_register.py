@@ -1,7 +1,7 @@
 """
-ChatGPT 批量自动注册工具 (并发版) - DuckMail 临时邮箱版
+ChatGPT 批量自动注册工具 (并发版) - Resend 收件版
 依赖: pip install curl_cffi
-功能: 使用 DuckMail 临时邮箱，并发自动注册 ChatGPT 账号，自动获取 OTP 验证码
+功能: 使用 Resend 接收入站邮件，并发自动注册 ChatGPT 账号，自动获取 OTP 验证码
 """
 
 import os
@@ -18,17 +18,20 @@ import secrets
 import hashlib
 import base64
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from urllib.parse import urlparse, parse_qs, urlencode
 
 from curl_cffi import requests as curl_requests
+from curl_cffi.requests import BrowserType
 
 # ================= 加载配置 =================
 def _load_config():
     """从 config.json 加载配置，环境变量优先级更高"""
     config = {
         "total_accounts": 3,
-        "duckmail_api_base": "https://api.duckmail.sbs",
-        "duckmail_bearer": "",
+        "resend_api_base": "https://api.resend.com",
+        "resend_api_key": "",
+        "resend_domain": "",
         "proxy": "",
         "output_file": "registered_accounts.txt",
         "enable_oauth": True,
@@ -52,8 +55,9 @@ def _load_config():
             print(f"⚠️ 加载 config.json 失败: {e}")
 
     # 环境变量优先级更高
-    config["duckmail_api_base"] = os.environ.get("DUCKMAIL_API_BASE", config["duckmail_api_base"])
-    config["duckmail_bearer"] = os.environ.get("DUCKMAIL_BEARER", config["duckmail_bearer"])
+    config["resend_api_base"] = os.environ.get("RESEND_API_BASE", config["resend_api_base"])
+    config["resend_api_key"] = os.environ.get("RESEND_API_KEY", config["resend_api_key"])
+    config["resend_domain"] = os.environ.get("RESEND_DOMAIN", config["resend_domain"])
     config["proxy"] = os.environ.get("PROXY", config["proxy"])
     config["total_accounts"] = int(os.environ.get("TOTAL_ACCOUNTS", config["total_accounts"]))
     config["enable_oauth"] = os.environ.get("ENABLE_OAUTH", config["enable_oauth"])
@@ -77,9 +81,21 @@ def _as_bool(value):
     return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def _normalize_resend_domain(value) -> str:
+    text = str(value or "").strip().lower()
+    if "@" in text:
+        text = text.rsplit("@", 1)[-1].strip()
+    return text
+
+
+def _is_resend_managed_domain(domain: str) -> bool:
+    return str(domain or "").strip().lower().endswith(".resend.app")
+
+
 _CONFIG = _load_config()
-DUCKMAIL_API_BASE = _CONFIG["duckmail_api_base"]
-DUCKMAIL_BEARER = _CONFIG["duckmail_bearer"]
+RESEND_API_BASE = _CONFIG["resend_api_base"].rstrip("/")
+RESEND_API_KEY = _CONFIG["resend_api_key"]
+RESEND_DOMAIN = _normalize_resend_domain(_CONFIG.get("resend_domain", ""))
 DEFAULT_TOTAL_ACCOUNTS = _CONFIG["total_accounts"]
 DEFAULT_PROXY = _CONFIG["proxy"]
 DEFAULT_OUTPUT_FILE = _CONFIG["output_file"]
@@ -94,14 +110,21 @@ TOKEN_JSON_DIR = _CONFIG["token_json_dir"]
 RESULTS_DIR = _CONFIG["results_dir"]
 RUN_OUTPUT_DIR = None
 
-if not DUCKMAIL_BEARER:
-    print("⚠️ 警告: 未设置 DUCKMAIL_BEARER，请在 config.json 中设置或设置环境变量")
-    print("   文件: config.json -> duckmail_bearer")
-    print("   环境变量: export DUCKMAIL_BEARER='your_api_key_here'")
+if not RESEND_API_KEY:
+    print("⚠️ 警告: 未设置 RESEND_API_KEY，请在 config.json 中设置或设置环境变量")
+    print("   文件: config.json -> resend_api_key")
+    print("   环境变量: export RESEND_API_KEY='re_xxx'")
+if not RESEND_DOMAIN:
+    print("⚠️ 警告: 未设置 RESEND_DOMAIN，请在 config.json 中设置或设置环境变量")
+    print("   文件: config.json -> resend_domain")
+    print("   环境变量: export RESEND_DOMAIN='ilkoxpra.resend.app'")
 
 # 全局线程锁
 _print_lock = threading.Lock()
 _file_lock = threading.Lock()
+_mail_capability_lock = threading.Lock()
+_resend_receiving_access_ok = False
+_resend_receiving_access_error = ""
 
 # 日志回调钩子 (供 FastAPI 层捕获日志)
 _log_callback = None  # callable(level: str, tag: str, message: str) -> None
@@ -112,15 +135,56 @@ def set_log_callback(callback):
     _log_callback = callback
 
 
+def _ensure_resend_receiving_access(session_factory, impersonate: str = None):
+    global _resend_receiving_access_ok, _resend_receiving_access_error
+    if not impersonate:
+        impersonate = _DEFAULT_IMPERSONATE
+
+    with _mail_capability_lock:
+        if _resend_receiving_access_ok:
+            return
+        if _resend_receiving_access_error:
+            raise Exception(_resend_receiving_access_error)
+
+        session = session_factory()
+        try:
+            resp = session.get(
+                f"{RESEND_API_BASE}/emails/receiving",
+                params={"limit": 1},
+                timeout=20,
+                impersonate=impersonate,
+            )
+        except Exception as e:
+            raise Exception(f"Resend Receiving API 连接失败: {e}")
+
+        if resp.status_code == 200:
+            _resend_receiving_access_ok = True
+            return
+
+        detail = (resp.text or "")[:240]
+        if resp.status_code == 401 and (
+            "restricted_api_key" in detail or "only send emails" in detail
+        ):
+            _resend_receiving_access_error = (
+                "当前 RESEND_API_KEY 仅支持发信，不支持 Receiving API。"
+                "请在 Resend 后台创建具备读取入站邮件权限的 API Key。"
+            )
+            raise Exception(_resend_receiving_access_error)
+
+        raise Exception(f"Resend Receiving API 校验失败: HTTP {resp.status_code} {detail}")
+
+
 def reload_config(new_config: dict):
     """从字典重新加载配置到模块级全局变量"""
-    global DUCKMAIL_API_BASE, DUCKMAIL_BEARER, DEFAULT_TOTAL_ACCOUNTS
+    global RESEND_API_BASE, RESEND_API_KEY, RESEND_DOMAIN, DEFAULT_TOTAL_ACCOUNTS
     global DEFAULT_PROXY, DEFAULT_OUTPUT_FILE, ENABLE_OAUTH, OAUTH_REQUIRED
     global OAUTH_ISSUER, OAUTH_CLIENT_ID, OAUTH_REDIRECT_URI
     global AK_FILE, RK_FILE, TOKEN_JSON_DIR, RESULTS_DIR, RUN_OUTPUT_DIR
+    global _resend_receiving_access_ok, _resend_receiving_access_error
 
-    DUCKMAIL_API_BASE = new_config.get("duckmail_api_base", DUCKMAIL_API_BASE)
-    DUCKMAIL_BEARER = new_config.get("duckmail_bearer", DUCKMAIL_BEARER)
+    RESEND_API_BASE = str(new_config.get("resend_api_base", RESEND_API_BASE) or RESEND_API_BASE).rstrip("/")
+    RESEND_API_KEY = new_config.get("resend_api_key", RESEND_API_KEY)
+    RESEND_DOMAIN = _normalize_resend_domain(new_config.get("resend_domain", RESEND_DOMAIN))
     DEFAULT_TOTAL_ACCOUNTS = int(new_config.get("total_accounts", DEFAULT_TOTAL_ACCOUNTS))
     DEFAULT_PROXY = new_config.get("proxy", DEFAULT_PROXY)
     DEFAULT_OUTPUT_FILE = new_config.get("output_file", DEFAULT_OUTPUT_FILE)
@@ -134,6 +198,8 @@ def reload_config(new_config: dict):
     TOKEN_JSON_DIR = new_config.get("token_json_dir", TOKEN_JSON_DIR)
     RESULTS_DIR = new_config.get("results_dir", RESULTS_DIR)
     RUN_OUTPUT_DIR = None
+    _resend_receiving_access_ok = False
+    _resend_receiving_access_error = ""
 
 
 # Chrome 指纹配置: impersonate 与 sec-ch-ua 必须匹配真实浏览器
@@ -160,9 +226,39 @@ _CHROME_PROFILES = [
     },
 ]
 
+_SUPPORTED_IMPERSONATES = {item.value for item in BrowserType}
+_AVAILABLE_CHROME_PROFILES = [
+    profile for profile in _CHROME_PROFILES
+    if profile["impersonate"] in _SUPPORTED_IMPERSONATES
+]
+if not _AVAILABLE_CHROME_PROFILES:
+    _AVAILABLE_CHROME_PROFILES = [profile for profile in _CHROME_PROFILES if profile["impersonate"] == "chrome131"] or _CHROME_PROFILES[:1]
 
-def _random_chrome_version():
-    profile = random.choice(_CHROME_PROFILES)
+# chatgpt.com 当前会对 chrome131 指纹直接返回 403，默认避开它。
+_BLOCKED_OPENAI_IMPERSONATES = {"chrome131"}
+_PREFERRED_CHROME_PROFILES = [
+    profile for profile in _AVAILABLE_CHROME_PROFILES
+    if profile["impersonate"] not in _BLOCKED_OPENAI_IMPERSONATES
+]
+if not _PREFERRED_CHROME_PROFILES:
+    _PREFERRED_CHROME_PROFILES = list(_AVAILABLE_CHROME_PROFILES)
+_PREFERRED_CHROME_PROFILES.sort(key=lambda item: item["major"], reverse=True)
+_DEFAULT_IMPERSONATE = (_PREFERRED_CHROME_PROFILES or _AVAILABLE_CHROME_PROFILES or _CHROME_PROFILES)[0]["impersonate"]
+
+
+def _pick_chrome_profile(exclude=None, allow_blocked=False):
+    excluded = set(exclude or ())
+    base_pool = _AVAILABLE_CHROME_PROFILES if allow_blocked else _PREFERRED_CHROME_PROFILES
+    candidates = [profile for profile in base_pool if profile["impersonate"] not in excluded]
+    if not candidates and not allow_blocked:
+        candidates = [profile for profile in _AVAILABLE_CHROME_PROFILES if profile["impersonate"] not in excluded]
+    if not candidates:
+        candidates = list(base_pool) or list(_AVAILABLE_CHROME_PROFILES) or list(_CHROME_PROFILES)
+    return random.choice(candidates)
+
+
+def _random_chrome_version(exclude=None, allow_blocked=False):
+    profile = _pick_chrome_profile(exclude=exclude, allow_blocked=allow_blocked)
     major = profile["major"]
     build = profile["build"]
     patch = random.randint(*profile["patch_range"])
@@ -676,115 +772,161 @@ def _generate_password(length=14):
     return "".join(pwd)
 
 
-# ================= DuckMail 邮箱函数 =================
+# ================= Resend 收件函数 =================
 
-def _create_duckmail_session():
-    """创建带重试的 DuckMail 请求会话"""
+def _create_resend_session():
+    """创建 Resend API 请求会话"""
     session = curl_requests.Session()
     session.headers.update({
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "Accept": "application/json",
         "Content-Type": "application/json",
+        "Authorization": f"Bearer {RESEND_API_KEY}",
     })
     return session
 
 
+def _parse_resend_created_at(raw_value) -> float:
+    text = str(raw_value or "").strip()
+    if not text:
+        return 0.0
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    try:
+        return datetime.fromisoformat(text).timestamp()
+    except Exception:
+        return 0.0
+
+
+def _normalize_mailbox_handle(mail_token) -> dict:
+    if isinstance(mail_token, dict):
+        email = str(mail_token.get("email", "")).strip().lower()
+        created_at = float(mail_token.get("created_at") or 0.0)
+        return {"email": email, "created_at": created_at}
+    email = str(mail_token or "").strip().lower()
+    return {"email": email, "created_at": 0.0}
+
+
+def _mailbox_debug_hint(mail_token) -> str:
+    mailbox = _normalize_mailbox_handle(mail_token)
+    email = mailbox.get("email") or "<unknown>"
+    domain = _normalize_resend_domain(email.rsplit("@", 1)[-1] if "@" in email else RESEND_DOMAIN)
+    if _is_resend_managed_domain(domain):
+        return (
+            f"Resend Receiving API 当前未看到发给 {email} 的入站邮件。"
+            "这个地址属于 Resend 托管接收域，通常不需要你自己再配 MX。"
+            "请确认验证码邮件确实发到了这个完整地址，并检查 Resend 后台该 receiving domain 是否可用。"
+        )
+    return (
+        f"Resend Receiving API 当前未看到发给 {email} 的入站邮件。"
+        "这通常说明邮件被你现有邮箱服务收到了，但没有进入 Resend。"
+        "如果根域已经有自己的 MX，按 Resend 文档更推荐使用子域做收件，"
+        "或者在现有邮箱服务里把该地址/catch-all 转发到 Resend。"
+    )
+
+
+def _extract_message_content(detail: dict) -> str:
+    parts = [
+        detail.get("text"),
+        detail.get("html"),
+        detail.get("raw"),
+        detail.get("content"),
+    ]
+    for key in ("headers", "attachments"):
+        value = detail.get(key)
+        if value:
+            parts.append(json.dumps(value, ensure_ascii=False))
+    return "\n".join(str(part) for part in parts if part)
+
+
+def _message_targets_mailbox(message: dict, mailbox_email: str) -> bool:
+    recipients = message.get("to") or []
+    if isinstance(recipients, str):
+        recipients = [recipients]
+    for item in recipients:
+        if isinstance(item, str) and item.strip().lower() == mailbox_email:
+            return True
+        if isinstance(item, dict):
+            addr = str(item.get("email") or item.get("address") or "").strip().lower()
+            if addr == mailbox_email:
+                return True
+    return False
+
+
 def create_temp_email():
-    """创建 DuckMail 临时邮箱，返回 (email, password, mail_token)"""
-    if not DUCKMAIL_BEARER:
-        raise Exception("DUCKMAIL_BEARER 未设置，无法创建临时邮箱")
+    """创建 Resend 域名下的随机邮箱地址，返回 (email, password, mail_token)"""
+    if not RESEND_API_KEY:
+        raise Exception("RESEND_API_KEY 未设置，无法接收临时邮箱邮件")
+    if not RESEND_DOMAIN:
+        raise Exception("RESEND_DOMAIN 未设置，无法生成接收邮箱地址")
+    _ensure_resend_receiving_access(_create_resend_session, _DEFAULT_IMPERSONATE)
 
-    # 生成随机邮箱前缀 8-13 位
     chars = string.ascii_lowercase + string.digits
-    length = random.randint(8, 13)
-    email_local = "".join(random.choice(chars) for _ in range(length))
-    email = f"{email_local}@duckmail.sbs"
-    password = _generate_password()
+    local_length = random.randint(10, 16)
+    email_local = "".join(random.choice(chars) for _ in range(local_length))
+    email = f"{email_local}@{RESEND_DOMAIN}"
+    mail_token = {"email": email, "created_at": time.time()}
+    return email, "", mail_token
 
-    api_base = DUCKMAIL_API_BASE.rstrip("/")
-    headers = {"Authorization": f"Bearer {DUCKMAIL_BEARER}"}
-    session = _create_duckmail_session()
+
+def _fetch_received_emails(mail_token):
+    """从 Resend 接收 API 拉取指定邮箱的入站邮件列表"""
+    mailbox = _normalize_mailbox_handle(mail_token)
+    mailbox_email = mailbox["email"]
+    if not mailbox_email:
+        return []
 
     try:
-        # 1. 创建账号
-        payload = {"address": email, "password": password}
-        res = session.post(
-            f"{api_base}/accounts",
-            json=payload,
-            headers=headers,
-            timeout=15,
-            impersonate="chrome131"
-        )
-
-        if res.status_code not in [200, 201]:
-            raise Exception(f"创建邮箱失败: {res.status_code} - {res.text[:200]}")
-
-        # 2. 获取 Token（用于读取邮件）
-        time.sleep(0.5)
-        token_payload = {"address": email, "password": password}
-        token_res = session.post(
-            f"{api_base}/token",
-            json=token_payload,
-            timeout=15,
-            impersonate="chrome131"
-        )
-
-        if token_res.status_code == 200:
-            token_data = token_res.json()
-            mail_token = token_data.get("token")
-            if mail_token:
-                return email, password, mail_token
-
-        raise Exception(f"获取邮件 Token 失败: {token_res.status_code}")
-
-    except Exception as e:
-        raise Exception(f"DuckMail 创建邮箱失败: {e}")
-
-
-def _fetch_emails_duckmail(mail_token: str):
-    """从 DuckMail 获取邮件列表"""
-    try:
-        api_base = DUCKMAIL_API_BASE.rstrip("/")
-        headers = {"Authorization": f"Bearer {mail_token}"}
-        session = _create_duckmail_session()
-
+        session = _create_resend_session()
         res = session.get(
-            f"{api_base}/messages",
-            headers=headers,
-            timeout=15,
-            impersonate="chrome131"
+            f"{RESEND_API_BASE}/emails/receiving",
+            params={"limit": 100},
+            timeout=20,
+            impersonate=_DEFAULT_IMPERSONATE,
         )
+        if res.status_code != 200:
+            return []
 
+        data = res.json()
+        messages = data.get("data") if isinstance(data, dict) else []
+        if not isinstance(messages, list):
+            return []
+
+        created_floor = max(0.0, mailbox["created_at"] - 30)
+        filtered = []
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            if not _message_targets_mailbox(message, mailbox_email):
+                continue
+            created_at = _parse_resend_created_at(message.get("created_at"))
+            if created_at and created_at < created_floor:
+                continue
+            filtered.append(message)
+
+        filtered.sort(key=lambda item: _parse_resend_created_at(item.get("created_at")), reverse=True)
+        return filtered
+    except Exception:
+        return []
+
+
+def _fetch_email_detail(mail_token, msg_id: str):
+    """获取 Resend 单封入站邮件详情"""
+    if not msg_id:
+        return None
+
+    try:
+        session = _create_resend_session()
+        res = session.get(
+            f"{RESEND_API_BASE}/emails/receiving/{msg_id}",
+            timeout=20,
+            impersonate=_DEFAULT_IMPERSONATE,
+        )
         if res.status_code == 200:
             data = res.json()
-            # DuckMail API 返回格式可能是 hydra:member 或 member
-            messages = data.get("hydra:member") or data.get("member") or data.get("data") or []
-            return messages
-        return []
-    except Exception as e:
-        return []
-
-
-def _fetch_email_detail_duckmail(mail_token: str, msg_id: str):
-    """获取 DuckMail 单封邮件详情"""
-    try:
-        api_base = DUCKMAIL_API_BASE.rstrip("/")
-        headers = {"Authorization": f"Bearer {mail_token}"}
-        session = _create_duckmail_session()
-
-        # 处理 msg_id 格式
-        if isinstance(msg_id, str) and msg_id.startswith("/messages/"):
-            msg_id = msg_id.split("/")[-1]
-
-        res = session.get(
-            f"{api_base}/messages/{msg_id}",
-            headers=headers,
-            timeout=15,
-            impersonate="chrome131"
-        )
-
-        if res.status_code == 200:
-            return res.json()
+            if isinstance(data, dict) and isinstance(data.get("data"), dict):
+                return data["data"]
+            return data if isinstance(data, dict) else None
     except Exception:
         pass
     return None
@@ -816,25 +958,27 @@ def _extract_verification_code(email_content: str):
 def wait_for_verification_email(mail_token: str, timeout: int = 120):
     """等待并提取 OpenAI 验证码"""
     start_time = time.time()
+    ever_seen_message = False
 
     while time.time() - start_time < timeout:
-        messages = _fetch_emails_duckmail(mail_token)
+        messages = _fetch_received_emails(mail_token)
         if messages and len(messages) > 0:
-            # 获取最新邮件详情
+            ever_seen_message = True
             first_msg = messages[0]
-            msg_id = first_msg.get("id") or first_msg.get("@id")
+            msg_id = first_msg.get("id")
 
             if msg_id:
-                detail = _fetch_email_detail_duckmail(mail_token, msg_id)
+                detail = _fetch_email_detail(mail_token, msg_id)
                 if detail:
-                    # DuckMail 的邮件内容在 text 或 html 字段
-                    content = detail.get("text") or detail.get("html") or ""
+                    content = _extract_message_content(detail)
                     code = _extract_verification_code(content)
                     if code:
                         return code
 
         time.sleep(3)
 
+    if not ever_seen_message:
+        print(f"[OTP] {_mailbox_debug_hint(mail_token)}")
     return None
 
 
@@ -861,6 +1005,10 @@ def _random_birthdate():
     return f"{y}-{m:02d}-{d:02d}"
 
 
+class OpenAIBrowserBlockedError(Exception):
+    """当前浏览器指纹被 OpenAI/ChatGPT 风控拦截。"""
+
+
 class ChatGPTRegister:
     BASE = "https://chatgpt.com"
     AUTH = "https://auth.openai.com"
@@ -869,15 +1017,16 @@ class ChatGPTRegister:
         self.tag = tag  # 线程标识，用于日志
         self.device_id = str(uuid.uuid4())
         self.auth_session_logging_id = str(uuid.uuid4())
-        self.impersonate, self.chrome_major, self.chrome_full, self.ua, self.sec_ch_ua = _random_chrome_version()
-
-        self.session = curl_requests.Session(impersonate=self.impersonate)
-
         self.proxy = proxy
-        if self.proxy:
-            self.session.proxies = {"http": self.proxy, "https": self.proxy}
+        self._callback_url = None
+        self._set_browser_profile()
 
-        self.session.headers.update({
+    def _build_session(self):
+        session = curl_requests.Session(impersonate=self.impersonate)
+        if self.proxy:
+            session.proxies = {"http": self.proxy, "https": self.proxy}
+
+        session.headers.update({
             "User-Agent": self.ua,
             "Accept-Language": random.choice([
                 "en-US,en;q=0.9", "en-US,en;q=0.9,zh-CN;q=0.8",
@@ -889,9 +1038,35 @@ class ChatGPTRegister:
             "sec-ch-ua-full-version": f'"{self.chrome_full}"',
             "sec-ch-ua-platform-version": f'"{random.randint(10, 15)}.0.0"',
         })
+        session.cookies.set("oai-did", self.device_id, domain="chatgpt.com")
+        return session
 
-        self.session.cookies.set("oai-did", self.device_id, domain="chatgpt.com")
-        self._callback_url = None
+    def _set_browser_profile(self, exclude=None, allow_blocked=False, reason: str = ""):
+        previous = getattr(self, "impersonate", "")
+        self.impersonate, self.chrome_major, self.chrome_full, self.ua, self.sec_ch_ua = _random_chrome_version(
+            exclude=exclude,
+            allow_blocked=allow_blocked,
+        )
+        self.session = self._build_session()
+        if reason:
+            prev_label = previous or "-"
+            self._print(f"[warn] {reason}，切换浏览器指纹 {prev_label} -> {self.impersonate} ({self.chrome_full})")
+
+    def _rotate_browser_profile(self, reason: str = "") -> bool:
+        current = getattr(self, "impersonate", "")
+        candidates = [
+            profile for profile in _PREFERRED_CHROME_PROFILES
+            if profile["impersonate"] != current
+        ]
+        if not candidates:
+            candidates = [
+                profile for profile in _AVAILABLE_CHROME_PROFILES
+                if profile["impersonate"] != current
+            ]
+        if not candidates:
+            return False
+        self._set_browser_profile(exclude={current}, reason=reason)
+        return True
 
     def _log(self, step, method, url, status, body=None):
         prefix = f"[{self.tag}] " if self.tag else ""
@@ -931,112 +1106,94 @@ class ChatGPTRegister:
         except Exception:
             return None
 
-    # ==================== DuckMail 临时邮箱 ====================
+    # ==================== Resend 收件 ====================
 
-    def _create_duckmail_session(self):
-        """创建带重试的 DuckMail 请求会话"""
+    def _create_mail_session(self):
+        """创建 Resend API 请求会话"""
         session = curl_requests.Session()
         session.headers.update({
             "User-Agent": self.ua,
             "Accept": "application/json",
             "Content-Type": "application/json",
+            "Authorization": f"Bearer {RESEND_API_KEY}",
         })
         if self.proxy:
             session.proxies = {"http": self.proxy, "https": self.proxy}
         return session
 
     def create_temp_email(self):
-        """创建 DuckMail 临时邮箱，返回 (email, password, mail_token)"""
-        if not DUCKMAIL_BEARER:
-            raise Exception("DUCKMAIL_BEARER 未设置，无法创建临时邮箱")
+        """创建 Resend 域名下的随机邮箱地址，返回 (email, password, mail_token)"""
+        if not RESEND_API_KEY:
+            raise Exception("RESEND_API_KEY 未设置，无法接收入站邮件")
+        if not RESEND_DOMAIN:
+            raise Exception("RESEND_DOMAIN 未设置，无法生成接收邮箱地址")
+        _ensure_resend_receiving_access(self._create_mail_session, self.impersonate)
 
-        # 生成随机邮箱前缀 8-13 位
         chars = string.ascii_lowercase + string.digits
-        length = random.randint(8, 13)
+        length = random.randint(10, 16)
         email_local = "".join(random.choice(chars) for _ in range(length))
-        email = f"{email_local}@duckmail.sbs"
-        password = _generate_password()
+        email = f"{email_local}@{RESEND_DOMAIN}"
+        return email, "", {"email": email, "created_at": time.time()}
 
-        api_base = DUCKMAIL_API_BASE.rstrip("/")
-        headers = {"Authorization": f"Bearer {DUCKMAIL_BEARER}"}
-        session = self._create_duckmail_session()
+    def _fetch_received_emails(self, mail_token):
+        """从 Resend 获取指定邮箱收到的邮件列表"""
+        mailbox = _normalize_mailbox_handle(mail_token)
+        mailbox_email = mailbox["email"]
+        if not mailbox_email:
+            return []
 
         try:
-            # 1. 创建账号
-            payload = {"address": email, "password": password}
-            res = session.post(
-                f"{api_base}/accounts",
-                json=payload,
-                headers=headers,
-                timeout=15,
-                impersonate=self.impersonate
-            )
-
-            if res.status_code not in [200, 201]:
-                raise Exception(f"创建邮箱失败: {res.status_code} - {res.text[:200]}")
-
-            # 2. 获取 Token（用于读取邮件）
-            time.sleep(0.5)
-            token_payload = {"address": email, "password": password}
-            token_res = session.post(
-                f"{api_base}/token",
-                json=token_payload,
-                timeout=15,
-                impersonate=self.impersonate
-            )
-
-            if token_res.status_code == 200:
-                token_data = token_res.json()
-                mail_token = token_data.get("token")
-                if mail_token:
-                    return email, password, mail_token
-
-            raise Exception(f"获取邮件 Token 失败: {token_res.status_code}")
-
-        except Exception as e:
-            raise Exception(f"DuckMail 创建邮箱失败: {e}")
-
-    def _fetch_emails_duckmail(self, mail_token: str):
-        """从 DuckMail 获取邮件列表"""
-        try:
-            api_base = DUCKMAIL_API_BASE.rstrip("/")
-            headers = {"Authorization": f"Bearer {mail_token}"}
-            session = self._create_duckmail_session()
-
+            session = self._create_mail_session()
             res = session.get(
-                f"{api_base}/messages",
-                headers=headers,
-                timeout=15,
-                impersonate=self.impersonate
+                f"{RESEND_API_BASE}/emails/receiving",
+                params={"limit": 100},
+                timeout=20,
+                impersonate=self.impersonate,
+            )
+
+            if res.status_code != 200:
+                return []
+
+            data = res.json()
+            messages = data.get("data") if isinstance(data, dict) else []
+            if not isinstance(messages, list):
+                return []
+
+            created_floor = max(0.0, mailbox["created_at"] - 30)
+            filtered = []
+            for message in messages:
+                if not isinstance(message, dict):
+                    continue
+                if not _message_targets_mailbox(message, mailbox_email):
+                    continue
+                created_at = _parse_resend_created_at(message.get("created_at"))
+                if created_at and created_at < created_floor:
+                    continue
+                filtered.append(message)
+
+            filtered.sort(key=lambda item: _parse_resend_created_at(item.get("created_at")), reverse=True)
+            return filtered
+        except Exception:
+            return []
+
+    def _fetch_email_detail(self, mail_token, msg_id: str):
+        """获取 Resend 单封入站邮件详情"""
+        if not msg_id:
+            return None
+
+        try:
+            session = self._create_mail_session()
+            res = session.get(
+                f"{RESEND_API_BASE}/emails/receiving/{msg_id}",
+                timeout=20,
+                impersonate=self.impersonate,
             )
 
             if res.status_code == 200:
                 data = res.json()
-                messages = data.get("hydra:member") or data.get("member") or data.get("data") or []
-                return messages
-            return []
-        except Exception:
-            return []
-
-    def _fetch_email_detail_duckmail(self, mail_token: str, msg_id: str):
-        """获取 DuckMail 单封邮件详情"""
-        try:
-            api_base = DUCKMAIL_API_BASE.rstrip("/")
-            headers = {"Authorization": f"Bearer {mail_token}"}
-            session = self._create_duckmail_session()
-
-            if isinstance(msg_id, str) and msg_id.startswith("/messages/"):
-                msg_id = msg_id.split("/")[-1]
-
-            res = session.get(
-                f"{api_base}/messages/{msg_id}",
-                headers=headers,
-                timeout=15,
-                impersonate=self.impersonate
-            )
-
-            if res.status_code == 200:
-                return res.json()
+                if isinstance(data, dict) and isinstance(data.get("data"), dict):
+                    return data["data"]
+                return data if isinstance(data, dict) else None
         except Exception:
             pass
         return None
@@ -1067,26 +1224,34 @@ class ChatGPTRegister:
         """等待并提取 OpenAI 验证码"""
         self._print(f"[OTP] 等待验证码邮件 (最多 {timeout}s)...")
         start_time = time.time()
+        ever_seen_message = False
+        hint_logged = False
 
         while time.time() - start_time < timeout:
-            messages = self._fetch_emails_duckmail(mail_token)
+            messages = self._fetch_received_emails(mail_token)
             if messages and len(messages) > 0:
+                ever_seen_message = True
                 first_msg = messages[0]
-                msg_id = first_msg.get("id") or first_msg.get("@id")
+                msg_id = first_msg.get("id")
 
                 if msg_id:
-                    detail = self._fetch_email_detail_duckmail(mail_token, msg_id)
+                    detail = self._fetch_email_detail(mail_token, msg_id)
                     if detail:
-                        content = detail.get("text") or detail.get("html") or ""
+                        content = _extract_message_content(detail)
                         code = self._extract_verification_code(content)
                         if code:
                             self._print(f"[OTP] 验证码: {code}")
                             return code
+            elif not hint_logged and time.time() - start_time >= 15:
+                self._print(f"[OTP] {_mailbox_debug_hint(mail_token)}")
+                hint_logged = True
 
             elapsed = int(time.time() - start_time)
             self._print(f"[OTP] 等待中... ({elapsed}s/{timeout}s)")
             time.sleep(3)
 
+        if not ever_seen_message and not hint_logged:
+            self._print(f"[OTP] {_mailbox_debug_hint(mail_token)}")
         self._print(f"[OTP] 超时 ({timeout}s)")
         return None
 
@@ -1100,6 +1265,9 @@ class ChatGPTRegister:
         }, allow_redirects=True)
         self._log("0. Visit homepage", "GET", url, r.status_code,
                    {"cookies_count": len(self.session.cookies)})
+        if r.status_code == 403:
+            raise OpenAIBrowserBlockedError(f"Homepage blocked (status={r.status_code})")
+        return r.status_code
 
     def get_csrf(self) -> str:
         url = f"{self.BASE}/api/auth/csrf"
@@ -1123,6 +1291,8 @@ class ChatGPTRegister:
                 self._print(f"[warn] csrf empty/non-json, retry {attempt}/3")
                 time.sleep(1.0 * attempt)
 
+        if last_status == 403:
+            raise OpenAIBrowserBlockedError(f"Failed to get CSRF token (status={last_status}, body={last_body})")
         raise Exception(f"Failed to get CSRF token (status={last_status}, body={last_body})")
 
     def signin(self, email: str, csrf: str) -> str:
@@ -1143,8 +1313,34 @@ class ChatGPTRegister:
         authorize_url = data.get("url", "")
         self._log("2. Signin", "POST", url, r.status_code, data)
         if not authorize_url:
+            if r.status_code == 403:
+                raise OpenAIBrowserBlockedError(
+                    f"Failed to get authorize URL (status={r.status_code}, body={(r.text or '')[:300]})"
+                )
             raise Exception(f"Failed to get authorize URL (status={r.status_code}, body={(r.text or '')[:300]})")
         return authorize_url
+
+    def bootstrap_signup(self, email: str) -> str:
+        last_error = None
+        max_attempts = max(1, len(_PREFERRED_CHROME_PROFILES or _AVAILABLE_CHROME_PROFILES))
+        for attempt in range(1, max_attempts + 1):
+            try:
+                self.visit_homepage()
+                _random_delay(0.3, 0.8)
+                csrf = self.get_csrf()
+                _random_delay(0.2, 0.5)
+                return self.signin(email, csrf)
+            except OpenAIBrowserBlockedError as e:
+                last_error = e
+                if attempt >= max_attempts:
+                    break
+                rotated = self._rotate_browser_profile(reason=f"OpenAI 入口返回 403，准备重试 ({attempt}/{max_attempts})")
+                if not rotated:
+                    break
+                _random_delay(0.8, 1.5)
+        if last_error:
+            raise last_error
+        raise Exception("Failed to bootstrap signup session")
 
     def authorize(self, url: str) -> str:
         r = self.session.get(url, headers={
@@ -1219,12 +1415,8 @@ class ChatGPTRegister:
     # ==================== 自动注册主流程 ====================
 
     def run_register(self, email, password, name, birthdate, mail_token):
-        """使用 DuckMail 的注册流程"""
-        self.visit_homepage()
-        _random_delay(0.3, 0.8)
-        csrf = self.get_csrf()
-        _random_delay(0.2, 0.5)
-        auth_url = self.signin(email, csrf)
+        """使用 Resend 收件邮箱的注册流程"""
+        auth_url = self.bootstrap_signup(email)
         _random_delay(0.3, 0.8)
 
         final_url = self.authorize(auth_url)
@@ -1266,7 +1458,7 @@ class ChatGPTRegister:
             need_otp = True
 
         if need_otp:
-            # 使用 DuckMail 等待验证码
+            # 使用 Resend 收件箱等待验证码
             otp_code = self.wait_for_verification_email(mail_token)
             if not otp_code:
                 raise Exception("未能获取验证码")
@@ -1781,24 +1973,28 @@ class ChatGPTRegister:
             tried_codes = set()
             otp_success = False
             otp_deadline = time.time() + 120
+            oauth_hint_logged = False
 
             while time.time() < otp_deadline and not otp_success:
-                messages = self._fetch_emails_duckmail(mail_token) or []
+                messages = self._fetch_received_emails(mail_token) or []
                 candidate_codes = []
 
                 for msg in messages[:12]:
-                    msg_id = msg.get("id") or msg.get("@id")
+                    msg_id = msg.get("id")
                     if not msg_id:
                         continue
-                    detail = self._fetch_email_detail_duckmail(mail_token, msg_id)
+                    detail = self._fetch_email_detail(mail_token, msg_id)
                     if not detail:
                         continue
-                    content = detail.get("text") or detail.get("html") or ""
+                    content = _extract_message_content(detail)
                     code = self._extract_verification_code(content)
                     if code and code not in tried_codes:
                         candidate_codes.append(code)
 
                 if not candidate_codes:
+                    if messages == [] and not oauth_hint_logged and time.time() >= otp_deadline - 105:
+                        self._print(f"[OAuth] {_mailbox_debug_hint(mail_token)}")
+                        oauth_hint_logged = True
                     elapsed = int(120 - max(0, otp_deadline - time.time()))
                     self._print(f"[OAuth] OTP 等待中... ({elapsed}s/120s)")
                     time.sleep(2)
@@ -1922,7 +2118,7 @@ class ChatGPTRegister:
 # ==================== 并发批量注册 ====================
 
 def _register_one(idx, total, proxy, output_file):
-    """单个注册任务 (在线程中运行) - 使用 DuckMail 临时邮箱"""
+    """单个注册任务 (在线程中运行) - 使用 Resend 域名收件"""
     reg = None
     try:
         reg = ChatGPTRegister(proxy=proxy, tag=f"{idx}")
@@ -1931,8 +2127,8 @@ def _register_one(idx, total, proxy, output_file):
         refresh_token = ""
         id_token = ""
 
-        # 1. 创建 DuckMail 临时邮箱
-        reg._print("[DuckMail] 创建临时邮箱...")
+        # 1. 生成 Resend 域名下的随机接收地址
+        reg._print("[Resend] 生成接收邮箱地址...")
         email, email_pwd, mail_token = reg.create_temp_email()
         tag = email.split("@")[0]
         reg.tag = tag  # 更新 tag
@@ -1945,7 +2141,7 @@ def _register_one(idx, total, proxy, output_file):
             print(f"\n{'='*60}")
             print(f"  [{idx}/{total}] 注册: {email}")
             print(f"  ChatGPT密码: {chatgpt_password}")
-            print(f"  邮箱密码: {email_pwd}")
+            print(f"  邮箱服务: Resend ({RESEND_DOMAIN})")
             print(f"  姓名: {name} | 生日: {birthdate}")
             print(f"{'='*60}")
 
@@ -2011,7 +2207,7 @@ def _register_one(idx, total, proxy, output_file):
 
 def run_batch(total_accounts: int = 3, output_file="registered_accounts.txt",
               max_workers=3, proxy=None, stop_event=None):
-    """并发批量注册 - DuckMail 临时邮箱版"""
+    """并发批量注册 - Resend 收件版"""
 
     if RUN_OUTPUT_DIR is None:
         _prepare_run_output_paths()
@@ -2019,17 +2215,18 @@ def run_batch(total_accounts: int = 3, output_file="registered_accounts.txt",
     elif not os.path.isabs(output_file):
         output_file = os.path.join(RUN_OUTPUT_DIR, os.path.basename(output_file))
 
-    if not DUCKMAIL_BEARER:
-        print("❌ 错误: 未设置 DUCKMAIL_BEARER 环境变量")
-        print("   请设置: export DUCKMAIL_BEARER='your_api_key_here'")
-        print("   或: set DUCKMAIL_BEARER=your_api_key_here (Windows)")
+    if not RESEND_API_KEY or not RESEND_DOMAIN:
+        print("❌ 错误: 未设置完整的 Resend 接收配置")
+        print("   需要: resend_api_key, resend_domain")
+        print("   环境变量: RESEND_API_KEY / RESEND_DOMAIN")
         return 0, 0
 
     actual_workers = min(max_workers, total_accounts)
     print(f"\n{'#'*60}")
-    print(f"  ChatGPT 批量自动注册 (DuckMail 临时邮箱版)")
+    print(f"  ChatGPT 批量自动注册 (Resend 收件版)")
     print(f"  注册数量: {total_accounts} | 并发数: {actual_workers}")
-    print(f"  DuckMail: {DUCKMAIL_API_BASE}")
+    print(f"  Resend API: {RESEND_API_BASE}")
+    print(f"  收件域名: {RESEND_DOMAIN}")
     print(f"  OAuth: {'开启' if ENABLE_OAUTH else '关闭'} | required: {'是' if OAUTH_REQUIRED else '否'}")
     if ENABLE_OAUTH:
         print(f"  OAuth Issuer: {OAUTH_ISSUER}")
@@ -2091,15 +2288,15 @@ def run_batch(total_accounts: int = 3, output_file="registered_accounts.txt",
 
 def main():
     print("=" * 60)
-    print("  ChatGPT 批量自动注册工具 (DuckMail 临时邮箱版)")
+    print("  ChatGPT 批量自动注册工具 (Resend 收件版)")
     print("=" * 60)
 
-    # 检查 DuckMail 配置
-    if not DUCKMAIL_BEARER:
-        print("\n⚠️  警告: 未设置 DUCKMAIL_BEARER")
-        print("   请编辑 config.json 设置 duckmail_bearer，或设置环境变量:")
-        print("   Windows: set DUCKMAIL_BEARER=your_api_key_here")
-        print("   Linux/Mac: export DUCKMAIL_BEARER='your_api_key_here'")
+    # 检查 Resend 配置
+    if not RESEND_API_KEY or not RESEND_DOMAIN:
+        print("\n⚠️  警告: 未设置完整的 Resend 接收配置")
+        print("   请编辑 config.json 设置 resend_api_key / resend_domain，或设置环境变量:")
+        print("   Windows: set RESEND_API_KEY=re_xxx && set RESEND_DOMAIN=ilkoxpra.resend.app")
+        print("   Linux/Mac: export RESEND_API_KEY='re_xxx' && export RESEND_DOMAIN='ilkoxpra.resend.app'")
         print("\n   按 Enter 继续尝试运行 (可能会失败)...")
         input()
 

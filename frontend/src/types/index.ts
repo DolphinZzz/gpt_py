@@ -1,7 +1,8 @@
 export interface Config {
   total_accounts: number
-  duckmail_api_base: string
-  duckmail_bearer: string
+  resend_api_base: string
+  resend_api_key: string
+  resend_domain: string
   proxy: string
   output_file: string
   enable_oauth: boolean

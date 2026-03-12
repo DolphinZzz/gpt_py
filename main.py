@@ -73,8 +73,9 @@ def _resolve_runtime_proxy(raw_proxy: str) -> tuple[str, Optional[str]]:
 
 class ConfigModel(BaseModel):
     total_accounts: int = 3
-    duckmail_api_base: str = "https://api.duckmail.sbs"
-    duckmail_bearer: str = ""
+    resend_api_base: str = "https://api.resend.com"
+    resend_api_key: str = ""
+    resend_domain: str = ""
     proxy: str = ""
     output_file: str = "registered_accounts.txt"
     enable_oauth: bool = True

@@ -74,12 +74,15 @@ export default function Config() {
           </Form.Item>
         </Card>
 
-        <Card type="inner" title="DuckMail 配置" style={{ marginBottom: 16 }}>
-          <Form.Item label="API 地址" name="duckmail_api_base">
+        <Card type="inner" title="Resend 收件配置" style={{ marginBottom: 16 }}>
+          <Form.Item label="API 地址" name="resend_api_base">
             <Input />
           </Form.Item>
-          <Form.Item label="Bearer Token" name="duckmail_bearer">
+          <Form.Item label="API Key" name="resend_api_key" tooltip="必须是可读取 Receiving API 的 key；只允许发信的 key 无法拉取验证码邮件">
             <Input.Password />
+          </Form.Item>
+          <Form.Item label="接收域名" name="resend_domain" tooltip="可填自定义收件域名，或 Resend 托管域如 ilkoxpra.resend.app；如果是自定义域，需先完成 Receiving DNS/MX 配置">
+            <Input placeholder="例如: ilkoxpra.resend.app" />
           </Form.Item>
         </Card>
 

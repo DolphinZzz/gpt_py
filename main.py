@@ -33,6 +33,7 @@ import convert_tokens_to_sub2api as sub2api
 BASE_DIR = Path(__file__).parent
 CONFIG_PATH = BASE_DIR / "config.json"
 RESULTS_DIR_NAME = "results"
+SUB2API_OUTPUT_NAME = "sub2api_accounts.json"
 
 
 def _parse_proxy_endpoint(raw_proxy: str) -> Optional[tuple[str, int]]:
@@ -114,15 +115,18 @@ class StartTaskRequest(BaseModel):
 
 
 class ConvertRequest(BaseModel):
-    source: str = "auto"           # auto | codex_tokens | ak_rk | results_file
+    source: str = "auto"           # auto | sub2api_json | codex_tokens | ak_rk | results_file
     run_id: Optional[str] = None   # specific run from results/
-    proxy: str = ""
-    proxy_name: str = "default"
     concurrency: int = 10
     priority: int = 1
     rate_multiplier: float = 1.0
     auto_pause_on_expired: bool = True
-    output_filename: str = "sub2api_accounts.json"
+    output_filename: str = SUB2API_OUTPUT_NAME
+
+
+class MailboxCodeQueryRequest(BaseModel):
+    mail_token: str
+    timeout: int = 15
 
 
 # ==================== Task Manager ====================
@@ -533,30 +537,37 @@ def _has_non_empty_file(path: Path) -> bool:
     return path.exists() and path.is_file() and path.stat().st_size > 0
 
 
-def _resolve_default_convert_dir(config: dict, source: str) -> Path:
-    histories = _scan_history()
+def _detect_convert_sources(work_dir: Path, config: dict) -> list[str]:
+    sources: list[str] = []
     token_dir_name = str(config.get("token_json_dir", "codex_tokens"))
     output_name = str(config.get("output_file", "registered_accounts.txt"))
     ak_name = str(config.get("ak_file", "ak.txt"))
     rk_name = str(config.get("rk_file", "rk.txt"))
+
+    tokens_dir = work_dir / token_dir_name
+    if _has_non_empty_file(work_dir / SUB2API_OUTPUT_NAME):
+        sources.append("sub2api_json")
+    if tokens_dir.exists() and tokens_dir.is_dir() and any(tokens_dir.glob("*.json")):
+        sources.append("codex_tokens")
+    if _has_non_empty_file(work_dir / output_name):
+        sources.append("results_file")
+    if _has_non_empty_file(work_dir / ak_name) and _has_non_empty_file(work_dir / rk_name):
+        sources.append("ak_rk")
+    return sources
+
+
+def _resolve_default_convert_dir(config: dict, source: str) -> Path:
+    histories = _scan_history()
 
     for item in histories:
         d = Path(str(item.get("path", "")))
         if not d.exists() or not d.is_dir():
             continue
 
-        tokens_dir = d / token_dir_name
-        has_tokens = tokens_dir.exists() and tokens_dir.is_dir() and any(tokens_dir.glob("*.json"))
-        has_results = _has_non_empty_file(d / output_name)
-        has_akrk = _has_non_empty_file(d / ak_name) and _has_non_empty_file(d / rk_name)
-
-        if source == "codex_tokens" and has_tokens:
+        sources = _detect_convert_sources(d, config)
+        if source == "auto" and sources:
             return d
-        if source == "results_file" and has_results:
-            return d
-        if source == "ak_rk" and has_akrk:
-            return d
-        if source == "auto" and (has_tokens or has_results or has_akrk):
+        if source in sources:
             return d
 
     return BASE_DIR
@@ -643,30 +654,28 @@ def _mark_uploaded_accounts(accounts: list[dict]) -> int:
 
 
 def _collect_sub2api_accounts(work_dir: Path, source: str, config: dict) -> list[dict]:
-    accounts: list[dict] = []
-    if source == "auto":
-        tokens_dir = work_dir / config.get("token_json_dir", "codex_tokens")
-        if tokens_dir.exists() and tokens_dir.is_dir():
-            accounts = sub2api.collect_from_codex_tokens(tokens_dir)
-        if not accounts:
+    source_order = ["sub2api_json", "codex_tokens", "results_file", "ak_rk"] if source == "auto" else [source]
+
+    for item in source_order:
+        if item == "sub2api_json":
+            accounts = sub2api.collect_from_sub2api_json(work_dir / SUB2API_OUTPUT_NAME)
+        elif item == "codex_tokens":
+            tokens_dir = work_dir / config.get("token_json_dir", "codex_tokens")
+            accounts = sub2api.collect_from_codex_tokens(tokens_dir) if tokens_dir.exists() and tokens_dir.is_dir() else []
+        elif item == "results_file":
             results_file = work_dir / config.get("output_file", "registered_accounts.txt")
             accounts = sub2api.collect_from_results_file(results_file)
-        if not accounts:
+        elif item == "ak_rk":
             ak_file = work_dir / config.get("ak_file", "ak.txt")
             rk_file = work_dir / config.get("rk_file", "rk.txt")
             accounts = sub2api.collect_from_ak_rk(ak_file, rk_file)
-    elif source == "codex_tokens":
-        tokens_dir = work_dir / config.get("token_json_dir", "codex_tokens")
-        if tokens_dir.exists() and tokens_dir.is_dir():
-            accounts = sub2api.collect_from_codex_tokens(tokens_dir)
-    elif source == "results_file":
-        results_file = work_dir / config.get("output_file", "registered_accounts.txt")
-        accounts = sub2api.collect_from_results_file(results_file)
-    elif source == "ak_rk":
-        ak_file = work_dir / config.get("ak_file", "ak.txt")
-        rk_file = work_dir / config.get("rk_file", "rk.txt")
-        accounts = sub2api.collect_from_ak_rk(ak_file, rk_file)
-    return accounts
+        else:
+            accounts = []
+
+        if accounts:
+            return accounts
+
+    return []
 
 
 def _normalize_bearer(raw: str) -> str:
@@ -905,10 +914,23 @@ def _parse_accounts(run_id: Optional[str] = None) -> list[dict]:
         acc = {
             "email": parts[0] if len(parts) > 0 else "",
             "password": parts[1] if len(parts) > 1 else "",
-            "email_password": parts[2] if len(parts) > 2 else "",
-            "oauth_status": parts[3].replace("oauth=", "") if len(parts) > 3 else "",
+            "email_password": "",
+            "oauth_status": "",
         }
-        for p in parts[4:]:
+        extra_parts = []
+        if len(parts) > 2:
+            third = parts[2]
+            if "=" not in third:
+                acc["email_password"] = third
+                extra_parts = parts[3:]
+            else:
+                extra_parts = parts[2:]
+
+        for p in extra_parts:
+            if p.startswith("oauth="):
+                acc["oauth_status"] = p[6:]
+            elif p.startswith("mail_token="):
+                acc["mail_token"] = p[11:]
             if p.startswith("access_token="):
                 acc["access_token"] = p[13:]
             elif p.startswith("refresh_token="):
@@ -917,6 +939,62 @@ def _parse_accounts(run_id: Optional[str] = None) -> list[dict]:
                 acc["id_token"] = p[9:]
         accounts.append(acc)
     return accounts
+
+
+def _query_mailbox_code(mail_token: str, timeout: int = 15) -> dict:
+    try:
+        mailbox = chatgpt_register.resolve_mailbox_query_token(mail_token)
+    except ValueError as e:
+        raise HTTPException(400, f"mail_token 无效: {e}") from e
+
+    email = str(mailbox.get("email") or "").strip().lower()
+    if not email:
+        raise HTTPException(400, "mail_token 无效: 缺少邮箱地址")
+
+    wait_seconds = max(0, min(int(timeout or 0), 120))
+    deadline = time.time() + wait_seconds
+    latest_message: Optional[dict[str, Any]] = None
+    ever_seen_message = False
+
+    while True:
+        messages = chatgpt_register._fetch_received_emails(mailbox) or []
+        if messages:
+            ever_seen_message = True
+            latest_message = messages[0] if isinstance(messages[0], dict) else None
+            msg_id = str((latest_message or {}).get("id") or "").strip()
+            detail = chatgpt_register._fetch_email_detail(mailbox, msg_id) if msg_id else None
+            content = chatgpt_register._extract_message_content(detail or {})
+            code = chatgpt_register._extract_verification_code(content)
+            if code:
+                return {
+                    "status": "ok",
+                    "email": email,
+                    "verification_code": code,
+                    "subject": str((latest_message or {}).get("subject") or ""),
+                    "message_id": msg_id or None,
+                    "received_at": (latest_message or {}).get("created_at"),
+                }
+
+        if time.time() >= deadline:
+            break
+        time.sleep(3)
+
+    hint = chatgpt_register._mailbox_debug_hint(mailbox)
+    if not ever_seen_message:
+        message = "暂未收到验证码邮件"
+    else:
+        message = "已收到邮件，但暂未提取到 6 位验证码"
+
+    return {
+        "status": "pending",
+        "email": email,
+        "verification_code": None,
+        "subject": str((latest_message or {}).get("subject") or ""),
+        "message_id": str((latest_message or {}).get("id") or "") or None,
+        "received_at": (latest_message or {}).get("created_at"),
+        "message": message,
+        "hint": hint,
+    }
 
 
 def _get_stats() -> dict:
@@ -1028,6 +1106,11 @@ async def list_accounts(run_id: Optional[str] = None):
     return _parse_accounts(run_id)
 
 
+@app.post("/api/mailbox/code")
+def query_mailbox_code(req: MailboxCodeQueryRequest):
+    return _query_mailbox_code(req.mail_token, req.timeout)
+
+
 @app.get("/api/accounts/{run_id}/download/{file_type}")
 async def download_file(run_id: str, file_type: str):
     allowed = {"ak": "ak.txt", "rk": "rk.txt", "sub2api": "sub2api_accounts.json", "accounts": "registered_accounts.txt"}
@@ -1084,7 +1167,6 @@ async def convert_to_sub2api(req: ConvertRequest):
         "status": "ok",
         "accounts_count": len(accounts),
         "output_path": str(output_path),
-        "proxy_key": "",
     }
 
 
@@ -1163,13 +1245,8 @@ async def list_convertible_runs():
     """List runs that have convertible token data."""
     runs = []
     # Check project root
-    root_sources = []
-    if (BASE_DIR / "codex_tokens").exists():
-        root_sources.append("codex_tokens")
-    if (BASE_DIR / "ak.txt").exists():
-        root_sources.append("ak_rk")
-    if (BASE_DIR / "registered_accounts.txt").exists():
-        root_sources.append("results_file")
+    config = _load_config()
+    root_sources = _detect_convert_sources(BASE_DIR, config)
     if root_sources:
         runs.append({"run_id": "", "label": "项目根目录", "sources": root_sources})
 
@@ -1181,13 +1258,7 @@ async def list_convertible_runs():
         for d in sorted(results_dir.iterdir(), reverse=True):
             if not d.is_dir() or not re.match(r"\d{8}_\d{6}", d.name):
                 continue
-            sources = []
-            if (d / "codex_tokens").exists():
-                sources.append("codex_tokens")
-            if (d / "ak.txt").exists():
-                sources.append("ak_rk")
-            if (d / "registered_accounts.txt").exists():
-                sources.append("results_file")
+            sources = _detect_convert_sources(d, config)
             if not sources:
                 continue
 

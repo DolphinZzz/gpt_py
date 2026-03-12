@@ -17,12 +17,19 @@ import traceback
 import secrets
 import hashlib
 import base64
+import hmac
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from urllib.parse import urlparse, parse_qs, urlencode
 
 from curl_cffi import requests as curl_requests
 from curl_cffi.requests import BrowserType
+from sub2api_utils import build_account as build_sub2api_account, decode_jwt_payload
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+MAILBOX_QUERY_TOKEN_SECRET_FILE = os.path.join(SCRIPT_DIR, ".mailbox_query_token_secret")
+_mailbox_query_token_secret_cache = None
+_mailbox_query_token_secret_lock = threading.Lock()
 
 # ================= 加载配置 =================
 def _load_config():
@@ -45,7 +52,7 @@ def _load_config():
         "results_dir": "results",
     }
 
-    config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+    config_path = os.path.join(SCRIPT_DIR, "config.json")
     if os.path.exists(config_path):
         try:
             with open(config_path, "r", encoding="utf-8") as f:
@@ -90,6 +97,120 @@ def _normalize_resend_domain(value) -> str:
 
 def _is_resend_managed_domain(domain: str) -> bool:
     return str(domain or "").strip().lower().endswith(".resend.app")
+
+
+def _urlsafe_b64encode(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
+def _urlsafe_b64decode(value: str) -> bytes:
+    raw = str(value or "").strip().encode("ascii")
+    if not raw:
+        return b""
+    return base64.urlsafe_b64decode(raw + (b"=" * (-len(raw) % 4)))
+
+
+def _get_mailbox_query_token_secret() -> bytes:
+    global _mailbox_query_token_secret_cache
+
+    if _mailbox_query_token_secret_cache:
+        return _mailbox_query_token_secret_cache
+
+    env_secret = str(os.environ.get("MAILBOX_QUERY_TOKEN_SECRET", "")).strip()
+    if env_secret:
+        _mailbox_query_token_secret_cache = env_secret.encode("utf-8")
+        return _mailbox_query_token_secret_cache
+
+    with _mailbox_query_token_secret_lock:
+        if _mailbox_query_token_secret_cache:
+            return _mailbox_query_token_secret_cache
+
+        secret = ""
+        if os.path.exists(MAILBOX_QUERY_TOKEN_SECRET_FILE):
+            try:
+                with open(MAILBOX_QUERY_TOKEN_SECRET_FILE, "r", encoding="utf-8") as f:
+                    secret = f.read().strip()
+            except Exception:
+                secret = ""
+
+        if not secret:
+            secret = secrets.token_urlsafe(48)
+            try:
+                with open(MAILBOX_QUERY_TOKEN_SECRET_FILE, "w", encoding="utf-8") as f:
+                    f.write(secret)
+            except Exception:
+                pass
+
+        _mailbox_query_token_secret_cache = secret.encode("utf-8")
+        return _mailbox_query_token_secret_cache
+
+
+def generate_mailbox_query_token(email: str, created_at: float) -> str:
+    payload = {
+        "v": 1,
+        "email": str(email or "").strip().lower(),
+        "created_at": round(float(created_at or time.time()), 3),
+        "nonce": secrets.token_urlsafe(8),
+    }
+    payload_bytes = json.dumps(payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    signature = hmac.new(_get_mailbox_query_token_secret(), payload_bytes, hashlib.sha256).digest()
+    return f"mbx_{_urlsafe_b64encode(payload_bytes)}.{_urlsafe_b64encode(signature)}"
+
+
+def resolve_mailbox_query_token(token: str) -> dict:
+    text = str(token or "").strip()
+    if not text.startswith("mbx_"):
+        raise ValueError("invalid mailbox query token format")
+
+    try:
+        payload_part, signature_part = text[4:].split(".", 1)
+        payload_bytes = _urlsafe_b64decode(payload_part)
+        signature = _urlsafe_b64decode(signature_part)
+    except Exception as e:
+        raise ValueError("invalid mailbox query token format") from e
+
+    expected = hmac.new(_get_mailbox_query_token_secret(), payload_bytes, hashlib.sha256).digest()
+    if not hmac.compare_digest(signature, expected):
+        raise ValueError("invalid mailbox query token signature")
+
+    try:
+        payload = json.loads(payload_bytes.decode("utf-8"))
+    except Exception as e:
+        raise ValueError("invalid mailbox query token payload") from e
+
+    email = str(payload.get("email") or "").strip().lower()
+    created_at = float(payload.get("created_at") or 0.0)
+    if not email:
+        raise ValueError("invalid mailbox query token payload")
+
+    return {
+        "email": email,
+        "created_at": created_at,
+        "query_token": text,
+    }
+
+
+def extract_mailbox_query_token(mail_token) -> str:
+    if isinstance(mail_token, dict):
+        token = str(mail_token.get("query_token") or mail_token.get("mail_token") or "").strip()
+        if token:
+            return token
+
+        email = str(mail_token.get("email") or "").strip().lower()
+        created_at = float(mail_token.get("created_at") or 0.0) or time.time()
+        if email:
+            token = generate_mailbox_query_token(email, created_at)
+            mail_token["query_token"] = token
+            mail_token["created_at"] = created_at
+            return token
+        return ""
+
+    text = str(mail_token or "").strip()
+    if text.startswith("mbx_"):
+        return text
+    if "@" in text:
+        return generate_mailbox_query_token(text, time.time())
+    return ""
 
 
 _CONFIG = _load_config()
@@ -479,21 +600,6 @@ def _extract_code_from_url(url: str):
         return None
 
 
-def _decode_jwt_payload(token: str):
-    try:
-        parts = token.split(".")
-        if len(parts) != 3:
-            return {}
-        payload = parts[1]
-        padding = 4 - len(payload) % 4
-        if padding != 4:
-            payload += "=" * padding
-        decoded = base64.urlsafe_b64decode(payload)
-        return json.loads(decoded)
-    except Exception:
-        return {}
-
-
 def _save_codex_tokens(email: str, tokens: dict):
     access_token = tokens.get("access_token", "")
     refresh_token = tokens.get("refresh_token", "")
@@ -518,7 +624,7 @@ def _save_codex_tokens(email: str, tokens: dict):
     if not access_token:
         return
 
-    payload = _decode_jwt_payload(access_token)
+    payload = decode_jwt_payload(access_token)
     auth_info = payload.get("https://api.openai.com/auth", {})
     account_id = auth_info.get("chatgpt_account_id", "")
 
@@ -553,125 +659,7 @@ def _save_codex_tokens(email: str, tokens: dict):
         with open(token_path, "w", encoding="utf-8") as f:
             json.dump(token_data, f, ensure_ascii=False)
 
-
-def _parse_proxy(raw_proxy: str, proxy_name: str = "default"):
-    proxy = (raw_proxy or "").strip()
-    if not proxy:
-        protocol = "http"
-        host = "127.0.0.1"
-        port = 1080
-    else:
-        protocol = "http"
-        body = proxy
-        if "://" in body:
-            protocol, body = body.split("://", 1)
-        body = body.rsplit("@", 1)[-1]
-        if ":" in body:
-            host, port_text = body.rsplit(":", 1)
-            try:
-                port = int(port_text)
-            except Exception:
-                port = 1080
-        else:
-            host = body
-            port = 1080
-        host = host or "127.0.0.1"
-
-    if host in {"127.0.0.1", "localhost"}:
-        host = "host.docker.internal"
-
-    proxy_key = f"{protocol}|{host}|{port}||"
-    proxy_obj = {
-        "proxy_key": proxy_key,
-        "name": proxy_name,
-        "protocol": protocol,
-        "host": host,
-        "port": port,
-        "status": "active",
-    }
-    return proxy_key, proxy_obj
-
-
-def _pick_organization_id(access_payload: dict, id_payload: dict) -> str:
-    auth_a = access_payload.get("https://api.openai.com/auth", {}) or {}
-    auth_i = id_payload.get("https://api.openai.com/auth", {}) or {}
-
-    for source in (auth_a, auth_i):
-        oid = source.get("organization_id")
-        if oid:
-            return oid
-        orgs = source.get("organizations")
-        if isinstance(orgs, list) and orgs:
-            first = orgs[0] or {}
-            if isinstance(first, dict) and first.get("id"):
-                return first["id"]
-    return ""
-
-
-def _iso_cn_from_ts(ts):
-    if not isinstance(ts, int) or ts <= 0:
-        return ""
-    from datetime import datetime, timedelta, timezone
-
-    tz_cn = timezone(timedelta(hours=8))
-    return datetime.fromtimestamp(ts, tz=tz_cn).isoformat(timespec="seconds")
-
-
-def _expires_in_from_ts(ts):
-    if not isinstance(ts, int):
-        return 0
-    from datetime import datetime, timezone
-
-    remain = int(ts - datetime.now(timezone.utc).timestamp())
-    return remain if remain > 0 else 0
-
-
-def _build_sub2api_account(
-    idx: int,
-    access_token: str,
-    refresh_token: str,
-    id_token: str,
-    fallback_email: str,
-    platform: str = "openai",
-):
-    access_payload = _decode_jwt_payload(access_token)
-    id_payload = _decode_jwt_payload(id_token) if id_token else {}
-
-    auth = access_payload.get("https://api.openai.com/auth", {}) or {}
-    profile = access_payload.get("https://api.openai.com/profile", {}) or {}
-
-    email = profile.get("email") or id_payload.get("email") or fallback_email or ""
-    exp_ts = access_payload.get("exp")
-
-    org_id = _pick_organization_id(access_payload, id_payload)
-
-    account = {
-        "name": str(idx),
-        "platform": platform,
-        "type": "oauth",
-        "credentials": {
-            "access_token": access_token,
-            "chatgpt_account_id": auth.get("chatgpt_account_id", ""),
-            "chatgpt_user_id": auth.get("chatgpt_user_id") or auth.get("user_id", ""),
-            "email": email,
-            "expires_at": _iso_cn_from_ts(exp_ts),
-            "expires_in": _expires_in_from_ts(exp_ts),
-            "id_token": id_token,
-            "organization_id": org_id,
-            "refresh_token": refresh_token,
-        },
-        "extra": {
-            "email": email,
-        },
-        "concurrency": 10,
-        "priority": 1,
-        "rate_multiplier": 1,
-        "auto_pause_on_expired": True,
-    }
-    return account
-
-
-def _update_sub2api_json(access_token: str, refresh_token: str, id_token: str, email: str, proxy: str):
+def _update_sub2api_json(access_token: str, refresh_token: str, id_token: str, email: str):
     if not access_token or not refresh_token:
         return
 
@@ -699,7 +687,7 @@ def _update_sub2api_json(access_token: str, refresh_token: str, id_token: str, e
             for item in accounts
         )
         if not exists:
-            account = _build_sub2api_account(
+            account = build_sub2api_account(
                 idx=len(accounts) + 1,
                 access_token=access_token,
                 refresh_token=refresh_token,
@@ -802,9 +790,27 @@ def _normalize_mailbox_handle(mail_token) -> dict:
     if isinstance(mail_token, dict):
         email = str(mail_token.get("email", "")).strip().lower()
         created_at = float(mail_token.get("created_at") or 0.0)
-        return {"email": email, "created_at": created_at}
-    email = str(mail_token or "").strip().lower()
-    return {"email": email, "created_at": 0.0}
+        query_token = str(mail_token.get("query_token") or mail_token.get("mail_token") or "").strip()
+        if query_token and (not email or not created_at):
+            try:
+                resolved = resolve_mailbox_query_token(query_token)
+                email = email or resolved.get("email", "")
+                created_at = created_at or float(resolved.get("created_at") or 0.0)
+            except ValueError:
+                pass
+        return {"email": email, "created_at": created_at, "query_token": query_token}
+
+    raw = str(mail_token or "").strip()
+    if raw.startswith("mbx_"):
+        resolved = resolve_mailbox_query_token(raw)
+        return {
+            "email": str(resolved.get("email") or "").strip().lower(),
+            "created_at": float(resolved.get("created_at") or 0.0),
+            "query_token": raw,
+        }
+
+    email = raw.lower()
+    return {"email": email, "created_at": 0.0, "query_token": ""}
 
 
 def _mailbox_debug_hint(mail_token) -> str:
@@ -865,7 +871,12 @@ def create_temp_email():
     local_length = random.randint(10, 16)
     email_local = "".join(random.choice(chars) for _ in range(local_length))
     email = f"{email_local}@{RESEND_DOMAIN}"
-    mail_token = {"email": email, "created_at": time.time()}
+    created_at = time.time()
+    mail_token = {
+        "email": email,
+        "created_at": created_at,
+        "query_token": generate_mailbox_query_token(email, created_at),
+    }
     return email, "", mail_token
 
 
@@ -1133,7 +1144,12 @@ class ChatGPTRegister:
         length = random.randint(10, 16)
         email_local = "".join(random.choice(chars) for _ in range(length))
         email = f"{email_local}@{RESEND_DOMAIN}"
-        return email, "", {"email": email, "created_at": time.time()}
+        created_at = time.time()
+        return email, "", {
+            "email": email,
+            "created_at": created_at,
+            "query_token": generate_mailbox_query_token(email, created_at),
+        }
 
     def _fetch_received_emails(self, mail_token):
         """从 Resend 获取指定邮箱收到的邮件列表"""
@@ -2174,6 +2190,9 @@ def _register_one(idx, total, proxy, output_file):
                 os.makedirs(output_dir, exist_ok=True)
             with open(output_file, "a", encoding="utf-8") as out:
                 line = f"{email}----{chatgpt_password}----{email_pwd}----oauth={'ok' if oauth_ok else 'fail'}"
+                mailbox_query_token = extract_mailbox_query_token(mail_token)
+                if mailbox_query_token:
+                    line = f"{email}----{chatgpt_password}----{email_pwd}----mail_token={mailbox_query_token}----oauth={'ok' if oauth_ok else 'fail'}"
                 if access_token and refresh_token:
                     line += f"----access_token={access_token}----refresh_token={refresh_token}"
                     if id_token:
@@ -2181,7 +2200,7 @@ def _register_one(idx, total, proxy, output_file):
                 out.write(f"{line}\n")
 
         if access_token and refresh_token:
-            _update_sub2api_json(access_token, refresh_token, id_token, email, proxy)
+            _update_sub2api_json(access_token, refresh_token, id_token, email)
 
         with _print_lock:
             print(f"\n[OK] [{tag}] {email} 注册成功!")

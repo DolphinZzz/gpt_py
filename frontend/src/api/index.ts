@@ -1,6 +1,6 @@
 import axios from 'axios'
 import { useEffect, useRef, useCallback, useState } from 'react'
-import type { Config, LogEntry, ConvertRequest, ConvertResult, ConvertibleRun } from '../types'
+import type { Config, LogEntry, ConvertRequest, ConvertResult, ConvertibleRun, MailboxCodeResult } from '../types'
 
 const api = axios.create({ baseURL: '/api' })
 
@@ -19,6 +19,8 @@ export const getTaskStatus = () => api.get('/tasks/status')
 export const getTaskHistory = () => api.get('/tasks/history')
 export const getAccounts = (runId?: string) =>
   api.get('/accounts', { params: runId ? { run_id: runId } : {} })
+export const queryMailboxCode = (data: { mail_token: string; timeout?: number }) =>
+  api.post<MailboxCodeResult>('/mailbox/code', data)
 export const getStats = () => api.get('/stats')
 export const convertToSub2Api = (data: ConvertRequest) => api.post<ConvertResult>('/convert', data)
 export const getConvertibleRuns = () => api.get<ConvertibleRun[]>('/convert/runs')

@@ -1,15 +1,15 @@
 import { useEffect, useState } from 'react'
 import { Card, Form, Input, InputNumber, Select, Switch, Button, Alert, Space, Descriptions, message } from 'antd'
 import { SwapOutlined, UploadOutlined } from '@ant-design/icons'
-import { convertToSub2Api, getConvertibleRuns, getConfig, uploadBackfillAccounts } from '../api'
+import { convertToSub2Api, getConvertibleRuns, uploadBackfillAccounts } from '../api'
 import type { ConvertRequest, ConvertResult, ConvertibleRun } from '../types'
 
-const sourceOptions = [
-  { value: 'auto', label: '自动检测 (推荐)' },
-  { value: 'codex_tokens', label: 'Codex Tokens (JSON 文件)' },
-  { value: 'results_file', label: '注册结果文件' },
-  { value: 'ak_rk', label: 'AK + RK 文件' },
-]
+const sourceLabels: Record<string, string> = {
+  sub2api_json: 'Sub2API JSON',
+  codex_tokens: 'Codex Tokens',
+  results_file: '注册结果文件',
+  ak_rk: 'AK/RK',
+}
 
 export default function Convert() {
   const [form] = Form.useForm()
@@ -21,10 +21,7 @@ export default function Convert() {
 
   useEffect(() => {
     getConvertibleRuns().then(r => setRuns(r.data))
-    getConfig().then(r => {
-      form.setFieldsValue({ proxy: r.data.proxy || '' })
-    })
-  }, [form])
+  }, [])
 
   const onFinish = async (values: ConvertRequest) => {
     setLoading(true)
@@ -45,7 +42,7 @@ export default function Convert() {
 
   const runOptions = runs.map(r => ({
     value: r.run_id,
-    label: r.run_id ? `${r.label} [${r.sources.join(', ')}]` : `${r.label} [${r.sources.join(', ')}]`,
+    label: `${r.label} [${r.sources.map(source => sourceLabels[source] || source).join(', ')}]`,
   }))
 
   const handleBackfillUpload = async () => {
@@ -81,10 +78,7 @@ export default function Convert() {
         layout="vertical"
         onFinish={onFinish}
         initialValues={{
-          source: 'auto',
           run_id: '',
-          proxy: '',
-          proxy_name: 'default',
           concurrency: 10,
           priority: 1,
           rate_multiplier: 1,
@@ -101,17 +95,12 @@ export default function Convert() {
           />
         </Form.Item>
 
-        <Form.Item label="数据源类型" name="source">
-          <Select options={sourceOptions} />
-        </Form.Item>
-
-        <Form.Item label="代理地址" name="proxy" tooltip="留空将从 config.json 读取，支持格式: host:port 或 http://host:port">
-          <Input placeholder="127.0.0.1:7897" />
-        </Form.Item>
-
-        <Form.Item label="代理名称" name="proxy_name">
-          <Input placeholder="default" />
-        </Form.Item>
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message="转换会优先直接复用批次里的 sub2api_accounts.json；如果不存在，再自动回退到 tokens、注册结果文件和 AK/RK。"
+        />
 
         <Space size="large" wrap>
           <Form.Item label="并发数" name="concurrency">
@@ -164,7 +153,6 @@ export default function Convert() {
           <Descriptions.Item label="状态">{result.status}</Descriptions.Item>
           <Descriptions.Item label="账号数量">{result.accounts_count}</Descriptions.Item>
           <Descriptions.Item label="输出路径">{result.output_path}</Descriptions.Item>
-          <Descriptions.Item label="代理 Key">{result.proxy_key}</Descriptions.Item>
         </Descriptions>
       )}
     </Card>

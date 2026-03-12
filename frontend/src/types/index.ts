@@ -66,9 +66,21 @@ export interface Account {
   password: string
   email_password: string
   oauth_status: string
+  mail_token?: string
   access_token?: string
   refresh_token?: string
   id_token?: string
+}
+
+export interface MailboxCodeResult {
+  status: 'ok' | 'pending'
+  email: string
+  verification_code?: string | null
+  subject?: string
+  message_id?: string | null
+  received_at?: string | null
+  message?: string
+  hint?: string
 }
 
 export interface Stats {
@@ -81,10 +93,8 @@ export interface Stats {
 }
 
 export interface ConvertRequest {
-  source: 'auto' | 'codex_tokens' | 'ak_rk' | 'results_file'
+  source?: 'auto' | 'sub2api_json' | 'codex_tokens' | 'ak_rk' | 'results_file'
   run_id?: string
-  proxy: string
-  proxy_name: string
   concurrency: number
   priority: number
   rate_multiplier: number
@@ -96,7 +106,6 @@ export interface ConvertResult {
   status: string
   accounts_count: number
   output_path: string
-  proxy_key: string
 }
 
 export interface ConvertibleRun {

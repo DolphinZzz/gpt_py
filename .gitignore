@@ -10,6 +10,7 @@ results/
 # 缓存/状态文件（你图里标的）
 auth_cache.json
 browser_state.json
+.mailbox_query_token_secret
 
 # 结账/抓取输出（你图里相关的）
 checkout_capture.json

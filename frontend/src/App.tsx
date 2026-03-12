@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { Layout, Menu, theme, Typography } from 'antd'
+import type { MenuProps } from 'antd'
 import {
   DashboardOutlined,
   SettingOutlined,
@@ -41,6 +42,8 @@ const pages: Record<string, React.ReactNode> = {
   accounts: <Accounts />,
 }
 
+type MenuClickKey = Parameters<NonNullable<MenuProps['onClick']>>[0]['key']
+
 export default function App() {
   const [current, setCurrent] = useState('dashboard')
   const [collapsed, setCollapsed] = useState(false)
@@ -64,7 +67,7 @@ export default function App() {
           theme="dark"
           mode="inline"
           selectedKeys={[current]}
-          onClick={({ key }) => setCurrent(key)}
+          onClick={({ key }) => setCurrent(String(key as MenuClickKey))}
           items={menuItems}
         />
       </Sider>

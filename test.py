@@ -1,4 +1,6 @@
-﻿import argparse
+from __future__ import annotations
+
+import argparse
 import base64
 import getpass
 import json
@@ -1727,4 +1729,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

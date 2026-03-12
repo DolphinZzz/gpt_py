@@ -79,7 +79,7 @@ export default function Logs() {
           />
           <Select
             value={source}
-            onChange={(v) => setSource(v)}
+            onChange={(v: 'app' | 'container') => setSource(v)}
             style={{ width: 110 }}
             options={[
               { value: 'app', label: '应用日志' },
@@ -100,7 +100,7 @@ export default function Logs() {
               />
               <Select
                 value={container || undefined}
-                onChange={(v) => setContainer(v || '')}
+                onChange={(v?: string) => setContainer(v || '')}
                 style={{ width: 170 }}
                 allowClear
                 placeholder="全部容器"

@@ -54,8 +54,8 @@ export default function Config() {
           <Form.Item label="容器数量" name="container_count">
             <InputNumber min={1} max={100} style={{ width: '100%' }} />
           </Form.Item>
-          <Form.Item label="代理地址" name="proxy">
-            <Input placeholder="例如: http://127.0.0.1:7890" />
+          <Form.Item label="代理地址" name="proxy" tooltip="留空表示直连；如果填写本机代理，请先确认对应端口已启动监听">
+            <Input placeholder="例如: http://127.0.0.1:7890；留空=直连" />
           </Form.Item>
         </Card>
 

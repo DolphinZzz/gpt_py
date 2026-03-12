@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import type { ChangeEvent } from 'react'
 import { Card, Button, Tag, Progress, Descriptions, Space, message, InputNumber, Input, Switch } from 'antd'
 import { PlayCircleOutlined, StopOutlined, SyncOutlined } from '@ant-design/icons'
 import { startTask, stopTask, getTaskStatus, getConfig } from '../api'
@@ -91,7 +92,7 @@ export default function TaskControl() {
             max={100000}
             addonBefore="目标"
             value={startOptions.total_accounts}
-            onChange={(v) => setStartOptions(p => ({ ...p, total_accounts: v || 1 }))}
+            onChange={(v: number | null) => setStartOptions(p => ({ ...p, total_accounts: v || 1 }))}
             disabled={useSavedConfig}
           />
           <InputNumber
@@ -99,14 +100,14 @@ export default function TaskControl() {
             max={200}
             addonBefore="容器内并发"
             value={startOptions.max_workers}
-            onChange={(v) => setStartOptions(p => ({ ...p, max_workers: v || 1 }))}
+            onChange={(v: number | null) => setStartOptions(p => ({ ...p, max_workers: v || 1 }))}
             disabled={useSavedConfig}
           />
           <Space>
             <span>容器模式</span>
             <Switch
               checked={startOptions.use_containers}
-              onChange={(checked) => setStartOptions(p => ({ ...p, use_containers: checked }))}
+              onChange={(checked: boolean) => setStartOptions(p => ({ ...p, use_containers: checked }))}
               disabled={useSavedConfig}
             />
           </Space>
@@ -116,7 +117,7 @@ export default function TaskControl() {
               max={100}
               addonBefore="容器数量"
               value={startOptions.container_count}
-              onChange={(v) => setStartOptions(p => ({ ...p, container_count: v || 1 }))}
+              onChange={(v: number | null) => setStartOptions(p => ({ ...p, container_count: v || 1 }))}
               disabled={useSavedConfig}
             />
           )}
@@ -124,7 +125,7 @@ export default function TaskControl() {
             style={{ width: 320 }}
             placeholder="代理地址，可选"
             value={startOptions.proxy}
-            onChange={(e) => setStartOptions(p => ({ ...p, proxy: e.target.value }))}
+            onChange={(e: ChangeEvent<HTMLInputElement>) => setStartOptions(p => ({ ...p, proxy: e.target.value }))}
             disabled={useSavedConfig}
           />
         </Space>

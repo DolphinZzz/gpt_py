@@ -24,7 +24,7 @@ def _load_runtime_config() -> dict:
         except Exception:
             cfg = {}
 
-    cfg["proxy"] = os.getenv("PROXY_URL", str(cfg.get("proxy", "socks5h://127.0.0.1:1080")))
+    cfg["proxy"] = os.getenv("PROXY_URL", str(cfg.get("proxy", "")))
     cfg["total_accounts"] = _to_int(os.getenv("TOTAL_ACCOUNTS", cfg.get("total_accounts", 3)), 3)
     cfg["max_workers"] = _to_int(os.getenv("MAX_WORKERS", cfg.get("max_workers", 3)), 3)
     cfg["results_dir"] = os.getenv("RESULTS_DIR", str(cfg.get("results_dir", "/data/results")))

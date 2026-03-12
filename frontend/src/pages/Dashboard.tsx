@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Card, Col, Progress, Row, Space, Spin, Statistic, Tag, theme, Typography } from 'antd'
 import { CheckCircleOutlined, CloseCircleOutlined, TeamOutlined, ThunderboltOutlined } from '@ant-design/icons'
-import { Column, Line, Pie } from '@ant-design/charts'
 import { getStats } from '../api'
 import type { Stats } from '../types'
 
@@ -34,26 +33,26 @@ export default function Dashboard() {
     { type: '失败', value: stats.total_fail },
   ]
 
-  const dailyTrendData = stats.daily.flatMap(d => [
-    { date: d.date, type: '成功', value: d.success },
-    { date: d.date, type: '失败', value: d.fail },
-  ])
-
   const dailyTotalData = stats.daily.map(d => ({
     date: d.date,
     total: d.success + d.fail,
+    successRate: d.success + d.fail > 0 ? (d.success / (d.success + d.fail)) * 100 : 0,
   }))
 
   let rollingSuccess = 0
   let rollingFail = 0
-  const cumulativeData = stats.daily.flatMap(d => {
+  const cumulativeData = stats.daily.map(d => {
     rollingSuccess += d.success
     rollingFail += d.fail
-    return [
-      { date: d.date, type: '累计成功', value: rollingSuccess },
-      { date: d.date, type: '累计失败', value: rollingFail },
-    ]
+    return {
+      date: d.date,
+      success: rollingSuccess,
+      fail: rollingFail,
+      total: rollingSuccess + rollingFail,
+    }
   })
+  const recentDays = dailyTotalData.slice(-7).reverse()
+  const latestCumulative = cumulativeData[cumulativeData.length - 1]
 
   const statCards = [
     {
@@ -134,7 +133,7 @@ export default function Dashboard() {
           <Progress
             percent={Number(stats.success_rate.toFixed(1))}
             strokeColor={{ from: '#1d39c4', to: '#52c41a' }}
-            format={(percent) => `当前成功率 ${percent ?? 0}%`}
+            format={(percent?: number) => `当前成功率 ${percent ?? 0}%`}
           />
           <Text type="secondary">平均每次运行产出：{averagePerRun} 个账号</Text>
         </Space>
@@ -158,36 +157,53 @@ export default function Dashboard() {
 
       <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
         <Col xs={24} xl={16}>
-          <Card title="每日成功/失败趋势" style={{ borderRadius: 12 }}>
-            {stats.daily.length > 0 ? (
-              <Line
-                data={dailyTrendData}
-                xField="date"
-                yField="value"
-                colorField="type"
-                height={320}
-                color={['#52c41a', '#ff4d4f']}
-                smooth
-                point={{ size: 4, shape: 'circle' }}
-              />
+          <Card title="最近 7 天成功/失败趋势" style={{ borderRadius: 12 }}>
+            {recentDays.length > 0 ? (
+              <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+                {recentDays.map((item) => (
+                  <div key={item.date} style={{ padding: '8px 0' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8, gap: 12, flexWrap: 'wrap' }}>
+                      <Text strong>{item.date}</Text>
+                      <Space size={8} wrap>
+                        <Tag color="green">成功 {stats.daily.find((d) => d.date === item.date)?.success ?? 0}</Tag>
+                        <Tag color="red">失败 {stats.daily.find((d) => d.date === item.date)?.fail ?? 0}</Tag>
+                        <Tag color="blue">总计 {item.total}</Tag>
+                      </Space>
+                    </div>
+                    <Progress
+                      percent={Number(item.successRate.toFixed(1))}
+                      strokeColor={{ from: '#1677ff', to: '#52c41a' }}
+                      format={(percent?: number) => `${percent ?? 0}%`}
+                    />
+                  </div>
+                ))}
+              </Space>
             ) : (
               <div style={{ textAlign: 'center', padding: 60, color: '#999' }}>暂无数据</div>
             )}
           </Card>
         </Col>
         <Col xs={24} xl={8}>
-          <Card title="成功/失败比例" style={{ borderRadius: 12 }}>
+          <Card title="成功/失败比例" style={{ borderRadius: 12, height: '100%' }}>
             {stats.total_accounts > 0 ? (
-              <Pie
-                data={pieData}
-                angleField="value"
-                colorField="type"
-                height={320}
-                innerRadius={0.6}
-                color={['#52c41a', '#ff4d4f']}
-                label={{ text: 'type', style: { fontSize: 14 } }}
-                legend={{ color: { position: 'bottom' } }}
-              />
+              <Space direction="vertical" size="large" style={{ width: '100%' }}>
+                {pieData.map((item) => {
+                  const percent = stats.total_accounts > 0 ? Number(((item.value / stats.total_accounts) * 100).toFixed(1)) : 0
+                  return (
+                    <div key={item.type}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
+                        <Text strong>{item.type}</Text>
+                        <Text>{item.value} 个</Text>
+                      </div>
+                      <Progress
+                        percent={percent}
+                        strokeColor={item.type === '成功' ? '#52c41a' : '#ff4d4f'}
+                        format={(value?: number) => `${value ?? 0}%`}
+                      />
+                    </div>
+                  )
+                })}
+              </Space>
             ) : (
               <div style={{ textAlign: 'center', padding: 60, color: '#999' }}>暂无数据</div>
             )}
@@ -199,14 +215,21 @@ export default function Dashboard() {
         <Col xs={24} lg={12}>
           <Card title="每日注册总量" style={{ borderRadius: 12 }}>
             {dailyTotalData.length > 0 ? (
-              <Column
-                data={dailyTotalData}
-                xField="date"
-                yField="total"
-                height={300}
-                color="#1677ff"
-                label={{ text: 'total', position: 'top' }}
-              />
+              <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+                {dailyTotalData.slice(-10).reverse().map((item) => (
+                  <div key={item.date}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
+                      <Text>{item.date}</Text>
+                      <Text strong>{item.total} 个</Text>
+                    </div>
+                    <Progress
+                      percent={Math.min(100, Math.max(8, item.total))}
+                      showInfo={false}
+                      strokeColor="#1677ff"
+                    />
+                  </div>
+                ))}
+              </Space>
             ) : (
               <div style={{ textAlign: 'center', padding: 60, color: '#999' }}>暂无数据</div>
             )}
@@ -215,16 +238,25 @@ export default function Dashboard() {
         <Col xs={24} lg={12}>
           <Card title="累计成功/失败走势" style={{ borderRadius: 12 }}>
             {cumulativeData.length > 0 ? (
-              <Line
-                data={cumulativeData}
-                xField="date"
-                yField="value"
-                colorField="type"
-                height={300}
-                color={['#389e0d', '#cf1322']}
-                smooth
-                point={{ size: 3, shape: 'circle' }}
-              />
+              <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+                <Card size="small" style={{ background: isDark ? '#111b26' : '#f7fbff' }}>
+                  <Space size="large" wrap>
+                    <Statistic title="累计成功" value={latestCumulative?.success ?? 0} valueStyle={{ color: '#389e0d' }} />
+                    <Statistic title="累计失败" value={latestCumulative?.fail ?? 0} valueStyle={{ color: '#cf1322' }} />
+                    <Statistic title="累计总量" value={latestCumulative?.total ?? 0} />
+                  </Space>
+                </Card>
+                {cumulativeData.slice(-7).reverse().map((item) => (
+                  <div key={item.date} style={{ display: 'flex', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+                    <Text>{item.date}</Text>
+                    <Space size={8} wrap>
+                      <Tag color="green">累计成功 {item.success}</Tag>
+                      <Tag color="red">累计失败 {item.fail}</Tag>
+                      <Tag>累计总量 {item.total}</Tag>
+                    </Space>
+                  </div>
+                ))}
+              </Space>
             ) : (
               <div style={{ textAlign: 'center', padding: 60, color: '#999' }}>暂无数据</div>
             )}

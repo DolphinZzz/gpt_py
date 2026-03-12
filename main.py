@@ -4,10 +4,13 @@ ChatGPT 批量注册工具 - FastAPI 后端
 访问: http://localhost:8000
 """
 
+from __future__ import annotations
+
 import os
 import re
 import json
 import time
+import socket
 import asyncio
 import threading
 import subprocess
@@ -15,12 +18,12 @@ import hashlib
 from collections import deque
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Any
+from typing import Optional, Any, Union
 from contextlib import asynccontextmanager
+from urllib.parse import urlparse
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from pydantic import BaseModel
 from curl_cffi import requests as curl_requests
 
@@ -32,13 +35,47 @@ CONFIG_PATH = BASE_DIR / "config.json"
 RESULTS_DIR_NAME = "results"
 
 
+def _parse_proxy_endpoint(raw_proxy: str) -> Optional[tuple[str, int]]:
+    proxy = str(raw_proxy or "").strip()
+    if not proxy:
+        return None
+    parsed = urlparse(proxy if "://" in proxy else f"http://{proxy}")
+    host = (parsed.hostname or "").strip()
+    if not host:
+        return None
+    return host, int(parsed.port or 1080)
+
+
+def _resolve_runtime_proxy(raw_proxy: str) -> tuple[str, Optional[str]]:
+    proxy = str(raw_proxy or "").strip()
+    if not proxy:
+        return "", None
+
+    endpoint = _parse_proxy_endpoint(proxy)
+    if not endpoint:
+        return proxy, None
+
+    host, port = endpoint
+    local_hosts = {"127.0.0.1", "localhost", "::1", "0.0.0.0"}
+    if host not in local_hosts:
+        return proxy, None
+
+    check_host = "127.0.0.1" if host in {"localhost", "0.0.0.0"} else host
+    try:
+        with socket.create_connection((check_host, port), timeout=0.5):
+            return proxy, None
+    except OSError as e:
+        detail = str(e).strip() or e.__class__.__name__
+        return "", f"本地代理 {proxy} 不可用（{detail}），本次任务已自动改为直连。"
+
+
 # ==================== Pydantic Models ====================
 
 class ConfigModel(BaseModel):
     total_accounts: int = 3
     duckmail_api_base: str = "https://api.duckmail.sbs"
     duckmail_bearer: str = ""
-    proxy: str = "socks5h://127.0.0.1:1080"
+    proxy: str = ""
     output_file: str = "registered_accounts.txt"
     enable_oauth: bool = True
     oauth_required: bool = True
@@ -314,6 +351,9 @@ class TaskManager:
             # Reset output dir so a new timestamp folder is created
             chatgpt_register.RUN_OUTPUT_DIR = None
             chatgpt_register.set_log_callback(self.emit_log)
+            proxy, proxy_warning = _resolve_runtime_proxy(proxy)
+            if proxy_warning:
+                self.emit_log("error", "system", proxy_warning)
 
         def _run():
             try:
@@ -666,7 +706,7 @@ def _build_codex_kwargs(config: dict, referer: str, timeout: int = 60) -> dict[s
     return kwargs
 
 
-def _fetch_accounts_page(config: dict, page: int, page_size: int) -> tuple[bool, dict | str]:
+def _fetch_accounts_page(config: dict, page: int, page_size: int) -> tuple[bool, Union[dict, str]]:
     url = str(config.get("sub2api_upload_url", "")).replace("/data", "")
     if not url.endswith("/accounts"):
         url = "https://www.codex.hair/api/v1/admin/accounts"
@@ -933,13 +973,13 @@ async def update_config(config: ConfigModel):
 @app.post("/api/tasks/start")
 async def start_task(req: Optional[StartTaskRequest] = None):
     config = _load_config()
-    total = (req and req.total_accounts) or config.get("total_accounts", 3)
-    workers = (req and req.max_workers) or config.get("max_workers", 3)
-    proxy = (req and req.proxy) or config.get("proxy", "")
+    total = req.total_accounts if req and req.total_accounts is not None else config.get("total_accounts", 3)
+    workers = req.max_workers if req and req.max_workers is not None else config.get("max_workers", 3)
+    proxy = req.proxy if req and req.proxy is not None else config.get("proxy", "")
     use_containers = config.get("use_containers", False)
     if req and req.use_containers is not None:
         use_containers = req.use_containers
-    container_count = (req and req.container_count) or config.get("container_count", 1)
+    container_count = req.container_count if req and req.container_count is not None else config.get("container_count", 1)
     try:
         task_manager.start_batch(
             total,
@@ -1313,21 +1353,106 @@ async def list_docker_containers(service: str = "worker"):
 # --- Serve Frontend ---
 
 frontend_dist = BASE_DIR / "frontend" / "dist"
+frontend_assets = frontend_dist / "assets"
+frontend_index = frontend_dist / "index.html"
 
-if frontend_dist.exists():
-    # Mount static assets
-    assets_dir = frontend_dist / "assets"
-    if assets_dir.exists():
-        app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="assets")
+def _frontend_placeholder() -> HTMLResponse:
+    html = """
+    <!DOCTYPE html>
+    <html lang="zh-CN">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>GPT 注册工具</title>
+        <style>
+            :root {
+                color-scheme: light;
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            }
+            body {
+                margin: 0;
+                background: linear-gradient(135deg, #0f172a, #1e293b 55%, #334155);
+                color: #e2e8f0;
+                min-height: 100vh;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                padding: 24px;
+            }
+            main {
+                width: min(720px, 100%);
+                background: rgba(15, 23, 42, 0.9);
+                border: 1px solid rgba(148, 163, 184, 0.25);
+                border-radius: 16px;
+                padding: 28px;
+                box-shadow: 0 18px 50px rgba(15, 23, 42, 0.35);
+            }
+            h1 {
+                margin: 0 0 12px;
+                font-size: 28px;
+            }
+            p, li {
+                line-height: 1.7;
+                color: #cbd5e1;
+            }
+            code {
+                background: rgba(148, 163, 184, 0.12);
+                border-radius: 6px;
+                padding: 2px 6px;
+            }
+            a {
+                color: #7dd3fc;
+            }
+            ul {
+                padding-left: 20px;
+                margin: 12px 0 0;
+            }
+        </style>
+    </head>
+    <body>
+        <main>
+            <h1>前端尚未构建</h1>
+            <p>后端服务已经启动，但当前目录下缺少 <code>frontend/dist/index.html</code>，所以仪表板页面无法直接显示。</p>
+            <ul>
+                <li>API 文档：<a href="/docs">/docs</a></li>
+                <li>健康检查可直接访问现有接口，例如 <a href="/api/config">/api/config</a></li>
+                <li>如需仪表板，请在 <code>frontend/</code> 下安装依赖并执行 <code>npm run build</code>，然后重启 <code>python3 main.py</code></li>
+            </ul>
+        </main>
+    </body>
+    </html>
+    """
+    return HTMLResponse(html)
 
-    @app.get("/{full_path:path}")
-    async def serve_spa(full_path: str):
-        # Try to serve the exact file first
-        file_path = frontend_dist / full_path
-        if full_path and file_path.exists() and file_path.is_file():
-            return FileResponse(file_path)
-        # SPA fallback
-        return FileResponse(frontend_dist / "index.html")
+@app.get("/", include_in_schema=False)
+async def serve_root():
+    if frontend_index.exists():
+        return FileResponse(frontend_index)
+    return _frontend_placeholder()
+
+
+@app.get("/assets/{asset_path:path}", include_in_schema=False)
+async def serve_frontend_assets(asset_path: str):
+    file_path = frontend_assets / asset_path
+    if file_path.exists() and file_path.is_file():
+        return FileResponse(file_path)
+    raise HTTPException(404, "Not Found")
+
+
+@app.get("/{full_path:path}", include_in_schema=False)
+async def serve_spa(full_path: str):
+    if full_path.startswith("api/"):
+        raise HTTPException(404, "Not Found")
+    if full_path in {"docs", "redoc", "openapi.json"}:
+        raise HTTPException(404, "Not Found")
+
+    # Try to serve the exact file first
+    file_path = frontend_dist / full_path
+    if full_path and file_path.exists() and file_path.is_file():
+        return FileResponse(file_path)
+    if frontend_index.exists():
+        return FileResponse(frontend_index)
+    return _frontend_placeholder()
 
 
 # ==================== Entry Point ====================

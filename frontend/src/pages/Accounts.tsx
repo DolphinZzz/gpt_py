@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import type { ChangeEvent } from 'react'
 import { Card, Table, Select, Input, Tag, Typography } from 'antd'
 import { getAccounts, getTaskHistory } from '../api'
 import type { Account, HistoryRun } from '../types'
@@ -85,7 +86,7 @@ export default function Accounts() {
         <Input.Search
           placeholder="搜索邮箱"
           value={search}
-          onChange={e => setSearch(e.target.value)}
+          onChange={(e: ChangeEvent<HTMLInputElement>) => setSearch(e.target.value)}
           style={{ width: 200 }}
           allowClear
         />

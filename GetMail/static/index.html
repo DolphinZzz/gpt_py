@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>GetMail</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="hero">
+        <div class="hero-copy">
+          <p class="eyebrow">Resend Mailbox Inspector</p>
+          <h1>GetMail</h1>
+          <p class="hero-text">
+            用注册项目生成的 <code>mail_token</code> 独立查询邮箱里的最新验证码、邮件主题和摘要。
+          </p>
+        </div>
+        <div class="hero-side">
+          <div class="status-card">
+            <span class="status-label">服务状态</span>
+            <strong id="health-status">检查中</strong>
+            <p id="health-meta">正在读取配置...</p>
+          </div>
+        </div>
+      </header>
+
+      <main class="content-grid">
+        <section class="panel">
+          <div class="panel-head">
+            <h2>邮件查询</h2>
+            <p>支持手动查询和自动轮询。查询只需要 <code>mail_token</code>，不需要暴露 Resend API Key。</p>
+          </div>
+          <form id="lookup-form" class="query-form">
+            <label class="field">
+              <span>Mail Token</span>
+              <textarea
+                id="mail-token"
+                rows="4"
+                placeholder="粘贴形如 mbx_xxx.yyy 的 mail_token"
+                spellcheck="false"
+              ></textarea>
+            </label>
+
+            <div class="form-row">
+              <label class="field compact-field">
+                <span>等待秒数</span>
+                <input id="timeout" type="number" min="0" max="120" value="15" />
+              </label>
+
+              <label class="field compact-field">
+                <span>返回邮件数</span>
+                <input id="limit" type="number" min="1" max="20" value="10" />
+              </label>
+
+              <label class="field toggle-field">
+                <span>自动轮询</span>
+                <div class="toggle-wrap">
+                  <input id="auto-refresh" type="checkbox" />
+                  <small>每 8 秒自动重查一次</small>
+                </div>
+              </label>
+            </div>
+
+            <div class="action-row">
+              <button id="lookup-btn" type="submit" class="primary-btn">查询邮箱</button>
+              <button id="copy-token-btn" type="button" class="ghost-btn">复制 Token</button>
+              <button id="clear-btn" type="button" class="ghost-btn">清空结果</button>
+              <span id="last-updated" class="last-updated">尚未查询</span>
+            </div>
+          </form>
+
+          <div id="banner" class="banner banner-neutral">
+            输入 <code>mail_token</code> 后即可查询，页面会优先展示最新可提取的 6 位验证码。
+          </div>
+        </section>
+
+        <section class="panel summary-panel">
+          <div class="panel-head">
+            <h2>查询结果</h2>
+            <p>摘要区会展示最新验证码、主题、状态和邮箱地址。</p>
+          </div>
+          <div class="summary-grid" id="summary-grid">
+            <article class="summary-card">
+              <span>状态</span>
+              <strong id="summary-status">未查询</strong>
+            </article>
+            <article class="summary-card">
+              <span>邮箱</span>
+              <strong id="summary-email">-</strong>
+            </article>
+            <article class="summary-card">
+              <span>最新验证码</span>
+              <strong id="summary-code">-</strong>
+            </article>
+            <article class="summary-card">
+              <span>邮件数量</span>
+              <strong id="summary-count">0</strong>
+            </article>
+            <article class="summary-card wide">
+              <span>最新主题</span>
+              <strong id="summary-subject">-</strong>
+            </article>
+            <article class="summary-card wide">
+              <span>提示</span>
+              <strong id="summary-hint">等待查询</strong>
+            </article>
+          </div>
+        </section>
+
+        <section class="panel table-panel">
+          <div class="panel-head">
+            <h2>邮件列表</h2>
+            <p>默认返回最近 10 封邮件。若正文里有 6 位验证码，会直接标注出来。</p>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>接收时间</th>
+                  <th>主题</th>
+                  <th>验证码</th>
+                  <th>发件人</th>
+                  <th>摘要</th>
+                </tr>
+              </thead>
+              <tbody id="messages-body">
+                <tr class="empty-row">
+                  <td colspan="5">暂无结果</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="/static/app.js" defer></script>
+  </body>
+  </html>
+

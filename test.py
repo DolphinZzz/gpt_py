@@ -79,6 +79,23 @@ def _parse_form_data(raw: str):
     except Exception:
         return {"raw": raw}
 
+
+def _emit_project_log(level: str, tag: str, message: str):
+    callback = getattr(chatgpt_register, "_log_callback", None)
+    if callable(callback):
+        try:
+            callback(level, tag, message)
+        except Exception:
+            pass
+
+
+def _safe_output_stem(value: str, default: str = "account") -> str:
+    text = str(value or "").strip().lower()
+    text = text.replace("@", "_at_")
+    text = re.sub(r"[^a-z0-9._-]+", "_", text)
+    text = text.strip("._-")
+    return text or default
+
 # 使用韩国画像
 def _open_url_visible_default(
     url: str,
@@ -258,45 +275,24 @@ def _extract_curl_cookies(session) -> list[dict]:
     return result
 
 
-def _try_fetch_duckmail_token(email: str, mail_password: str, proxy: str | None) -> str | None:
-    email_text = str(email or "").strip()
-    password_text = str(mail_password or "").strip()
-    if not email_text.lower().endswith("@duckmail.sbs") or not password_text:
-        return None
+def _resolve_resend_mail_token(email: str, mail_token: str | None) -> str:
+    raw_mail_token = str(mail_token or "").strip()
+    if raw_mail_token:
+        resolved_token = str(chatgpt_register.extract_mailbox_query_token(raw_mail_token) or "").strip()
+        if resolved_token:
+            if resolved_token != raw_mail_token:
+                print("[ok] resend mailbox query token generated from provided mailbox identifier")
+            return resolved_token
+        print("[warn] provided mail_token is invalid for Resend; fallback to local token generation")
 
-    api_base = str(getattr(chatgpt_register, "DUCKMAIL_API_BASE", "") or "").strip().rstrip("/")
-    if not api_base:
-        return None
+    email_text = str(email or "").strip().lower()
+    if not email_text or "@" not in email_text:
+        return ""
 
-    session_factory = getattr(chatgpt_register, "_create_duckmail_session", None)
-    if not callable(session_factory):
-        return None
-
-    session = session_factory()
-    if proxy:
-        try:
-            session.proxies = {"http": proxy, "https": proxy}
-        except Exception:
-            pass
-
-    try:
-        resp = session.post(
-            f"{api_base}/token",
-            json={"address": email_text, "password": password_text},
-            timeout=15,
-            impersonate="chrome131",
-        )
-        if resp.status_code != 200:
-            print(f"[warn] duckmail token fetch failed: status={resp.status_code}")
-            return None
-        data = resp.json()
-        token = str(data.get("token") or "").strip()
-        if token:
-            print("[ok] duckmail mail_token fetched automatically")
-            return token
-    except Exception as e:
-        print(f"[warn] duckmail token fetch failed: {e}")
-    return None
+    resolved_token = str(chatgpt_register.extract_mailbox_query_token(email_text) or "").strip()
+    if resolved_token:
+        print("[ok] resend mailbox query token generated locally from email")
+    return resolved_token
 
 
 def _protocol_login_bootstrap(
@@ -307,11 +303,7 @@ def _protocol_login_bootstrap(
     mail_token: str | None,
     mail_password: str | None,
 ):
-    effective_mail_token = (mail_token or "").strip() or _try_fetch_duckmail_token(
-        email=email,
-        mail_password=mail_password or password,
-        proxy=proxy,
-    ) or ""
+    effective_mail_token = _resolve_resend_mail_token(email=email, mail_token=mail_token)
     reg = chatgpt_register.ChatGPTRegister(proxy=proxy or "", tag="capture")
     reg._print("[capture] trying protocol login via chatgpt_register")
     tokens = reg.perform_codex_oauth_login_http(email=email, password=password, mail_token=effective_mail_token)
@@ -337,16 +329,15 @@ def _protocol_login_session(
     mail_token: str | None,
     mail_password: str | None,
 ):
-    if not (mail_token or "").strip():
-        mail_token = _try_fetch_duckmail_token(email=email, mail_password=mail_password or password, proxy=proxy)
+    effective_mail_token = _resolve_resend_mail_token(email=email, mail_token=mail_token)
 
     reg = chatgpt_register.ChatGPTRegister(proxy=proxy or "", tag="capture")
     reg._print("[capture] trying protocol login via chatgpt_register")
-    tokens = reg.perform_codex_oauth_login_http(email=email, password=password, mail_token=mail_token or "")
+    tokens = reg.perform_codex_oauth_login_http(email=email, password=password, mail_token=effective_mail_token)
     if not isinstance(tokens, dict) or not tokens.get("access_token"):
         hint = ""
-        if not (mail_token or "").strip():
-            hint = "; hint: pass --mail-token or set MAIL_TOKEN for OAuth email OTP"
+        if not effective_mail_token:
+            hint = "; hint: pass --mail-token or use an email that Resend Receiving API can query"
         return None, None, f"protocol login failed{hint}"
     return reg, tokens, "ok"
 
@@ -1029,19 +1020,25 @@ def _run_protocol_only(
     refresh_auth: bool,
     skip_runtime_capture: bool,
     stripe_open_mode: str,
+    existing_reg=None,
+    existing_tokens: dict[str, Any] | None = None,
+    open_stripe_hosted_url: bool = True,
 ):
-    reg, tokens, msg = _protocol_login_session_with_cache(
-        email=email,
-        password=password,
-        proxy=proxy,
-        mail_token=mail_token,
-        mail_password=mail_password,
-        cache_file=auth_cache_file,
-        no_cache=no_auth_cache,
-        refresh_auth=refresh_auth,
-    )
+    reg = existing_reg
+    tokens = existing_tokens if isinstance(existing_tokens, dict) else None
     if not reg or not tokens:
-        raise RuntimeError(msg)
+        reg, tokens, msg = _protocol_login_session_with_cache(
+            email=email,
+            password=password,
+            proxy=proxy,
+            mail_token=mail_token,
+            mail_password=mail_password,
+            cache_file=auth_cache_file,
+            no_cache=no_auth_cache,
+            refresh_auth=refresh_auth,
+        )
+        if not reg or not tokens:
+            raise RuntimeError(msg)
 
     access_token = str(tokens.get("access_token") or "").strip()
     if not access_token:
@@ -1135,7 +1132,9 @@ def _run_protocol_only(
             print(f"[ok] protocol stripe_init status={init_resp.status_code}")
             if stripe_hosted_url:
                 print(f"[ok] stripe hosted url: {stripe_hosted_url}")
-                if (stripe_open_mode or "").strip().lower() == "system":
+                if not open_stripe_hosted_url:
+                    print("[info] skip opening stripe hosted url (open_stripe_hosted_url=false)")
+                elif (stripe_open_mode or "").strip().lower() == "system":
                     stripe_open_res = _open_url_in_system_browser(stripe_hosted_url)
                 else:
                     stripe_open_res = _open_url_visible_default(
@@ -1144,13 +1143,14 @@ def _run_protocol_only(
                         screenshot_file="stripe_headed_kr.png",
                         keep_open=True,
                     )
-                if stripe_open_res.get("ok"):
-                    print(
-                        f"[ok] opened stripe hosted url "
-                        f"method={stripe_open_res.get('method')} status={stripe_open_res.get('status')} final={stripe_open_res.get('final_url')}"
-                    )
-                else:
-                    print(f"[warn] failed to open stripe hosted url: {stripe_open_res.get('error')}")
+                if open_stripe_hosted_url:
+                    if stripe_open_res.get("ok"):
+                        print(
+                            f"[ok] opened stripe hosted url "
+                            f"method={stripe_open_res.get('method')} status={stripe_open_res.get('status')} final={stripe_open_res.get('final_url')}"
+                        )
+                    else:
+                        print(f"[warn] failed to open stripe hosted url: {stripe_open_res.get('error')}")
         except Exception as e:
             init_result = {"ok": False, "error": str(e)}
             print(f"[error] protocol stripe_init failed: {e}")
@@ -1230,6 +1230,85 @@ def _run_protocol_only(
     }
     out_file.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"[ok] protocol results -> {out_file}")
+    return result
+
+
+def run_registered_account_flow(
+    *,
+    email: str,
+    password: str,
+    proxy: str | None,
+    mail_token: str | None,
+    output_dir: str | Path | None = None,
+    tag: str = "",
+    existing_reg=None,
+    existing_tokens: dict[str, Any] | None = None,
+) -> dict:
+    output_base = Path(output_dir or Path.cwd()).resolve()
+    output_base.mkdir(parents=True, exist_ok=True)
+
+    stem = _safe_output_stem(email, default="registered_account")
+    out_file = output_base / f"{stem}_checkout_capture.json"
+    auth_cache_file = output_base / f"{stem}_auth_cache.json"
+    browser_state_file = output_base / f"{stem}_browser_state.json"
+    log_tag = str(tag or stem)
+
+    start_msg = f"[post-checkout] 开始执行 test.py 自动链路: {email}"
+    print(start_msg)
+    _emit_project_log("info", log_tag, start_msg)
+
+    try:
+        result = _run_protocol_only(
+            email=email,
+            password=password,
+            out_file=out_file,
+            proxy=proxy,
+            checkout_payload_json="",
+            openai_sentinel_token="",
+            stripe_confirm_url="",
+            stripe_confirm_payload_b64="",
+            max_wait_ms=600000,
+            mail_token=mail_token,
+            mail_password=None,
+            auth_cache_file=auth_cache_file,
+            browser_state_file=browser_state_file,
+            no_auth_cache=True,
+            refresh_auth=False,
+            skip_runtime_capture=True,
+            stripe_open_mode="system",
+            existing_reg=existing_reg,
+            existing_tokens=existing_tokens,
+            open_stripe_hosted_url=False,
+        )
+    except Exception as e:
+        error_msg = f"[post-checkout] test.py 自动链路异常: {e}"
+        print(error_msg)
+        _emit_project_log("error", log_tag, error_msg)
+        return {"ok": False, "output": str(out_file), "error": str(e)}
+
+    issues: list[str] = []
+    checkout_result = result.get("checkout_result") if isinstance(result, dict) else {}
+    stripe_init_result = result.get("stripe_init_result") if isinstance(result, dict) else {}
+    checkout_status = int((checkout_result or {}).get("status") or 0)
+    stripe_init_status = int((stripe_init_result or {}).get("status") or 0)
+
+    if not (checkout_result or {}).get("ok") or not 200 <= checkout_status < 300:
+        issues.append(f"checkout_status={checkout_status or 'unknown'}")
+    if not (stripe_init_result or {}).get("ok") or not 200 <= stripe_init_status < 300:
+        issues.append(f"stripe_init_status={stripe_init_status or 'unknown'}")
+    if not str(result.get("stripe_hosted_url") or "").strip():
+        issues.append("stripe_hosted_url_missing")
+
+    if issues:
+        error_msg = f"[post-checkout] test.py 自动链路失败: {', '.join(issues)} | 输出: {out_file}"
+        print(error_msg)
+        _emit_project_log("error", log_tag, error_msg)
+        return {"ok": False, "output": str(out_file), "issues": issues, "result": result}
+
+    done_msg = f"[post-checkout] test.py 自动链路完成: {out_file}"
+    print(done_msg)
+    _emit_project_log("info", log_tag, done_msg)
+    return {"ok": True, "output": str(out_file), "result": result}
 
 
 def _body_to_bytes(body) -> bytes:
@@ -1561,7 +1640,11 @@ def main():
     parser = argparse.ArgumentParser(description="Headless Playwright: login and capture checkout request chain")
     parser.add_argument("--email", default=os.environ.get("OPENAI_EMAIL", ""), help="Login email")
     parser.add_argument("--password", default=os.environ.get("OPENAI_PASSWORD", ""), help="Login password")
-    parser.add_argument("--mail-password", default=os.environ.get("MAIL_PASSWORD", ""), help="Mailbox password for fetching DuckMail mail_token")
+    parser.add_argument(
+        "--mail-password",
+        default=os.environ.get("MAIL_PASSWORD", ""),
+        help="Legacy mailbox password option; ignored for Resend mailbox query tokens",
+    )
     parser.add_argument("--output", default="checkout_capture.json", help="Output JSON path")
     parser.add_argument("--max-wait-ms", type=int, default=600000, help="Max capture wait time after trigger")
     parser.add_argument("--proxy", default="", help="Optional proxy url like socks5h://127.0.0.1:1080")
@@ -1608,7 +1691,7 @@ def main():
     parser.add_argument(
         "--mail-token",
         default=os.environ.get("MAIL_TOKEN", ""),
-        help="Mail API token for auto OTP during OAuth (DuckMail token)",
+        help="Mailbox query token for auto OTP during OAuth (Resend mbx_ token or mailbox email)",
     )
     parser.add_argument(
         "--auth-cache-file",

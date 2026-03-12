@@ -29,6 +29,7 @@ from curl_cffi import requests as curl_requests
 
 import chatgpt_register
 import convert_tokens_to_sub2api as sub2api
+from GetMail.mail_service import lookup_mailbox as getmail_lookup_mailbox
 
 BASE_DIR = Path(__file__).parent
 CONFIG_PATH = BASE_DIR / "config.json"
@@ -943,57 +944,18 @@ def _parse_accounts(run_id: Optional[str] = None) -> list[dict]:
 
 def _query_mailbox_code(mail_token: str, timeout: int = 15) -> dict:
     try:
-        mailbox = chatgpt_register.resolve_mailbox_query_token(mail_token)
+        result = getmail_lookup_mailbox(mail_token, timeout=timeout, limit=10)
     except ValueError as e:
         raise HTTPException(400, f"mail_token 无效: {e}") from e
-
-    email = str(mailbox.get("email") or "").strip().lower()
-    if not email:
-        raise HTTPException(400, "mail_token 无效: 缺少邮箱地址")
-
-    wait_seconds = max(0, min(int(timeout or 0), 120))
-    deadline = time.time() + wait_seconds
-    latest_message: Optional[dict[str, Any]] = None
-    ever_seen_message = False
-
-    while True:
-        messages = chatgpt_register._fetch_received_emails(mailbox) or []
-        if messages:
-            ever_seen_message = True
-            latest_message = messages[0] if isinstance(messages[0], dict) else None
-            msg_id = str((latest_message or {}).get("id") or "").strip()
-            detail = chatgpt_register._fetch_email_detail(mailbox, msg_id) if msg_id else None
-            content = chatgpt_register._extract_message_content(detail or {})
-            code = chatgpt_register._extract_verification_code(content)
-            if code:
-                return {
-                    "status": "ok",
-                    "email": email,
-                    "verification_code": code,
-                    "subject": str((latest_message or {}).get("subject") or ""),
-                    "message_id": msg_id or None,
-                    "received_at": (latest_message or {}).get("created_at"),
-                }
-
-        if time.time() >= deadline:
-            break
-        time.sleep(3)
-
-    hint = chatgpt_register._mailbox_debug_hint(mailbox)
-    if not ever_seen_message:
-        message = "暂未收到验证码邮件"
-    else:
-        message = "已收到邮件，但暂未提取到 6 位验证码"
-
     return {
-        "status": "pending",
-        "email": email,
-        "verification_code": None,
-        "subject": str((latest_message or {}).get("subject") or ""),
-        "message_id": str((latest_message or {}).get("id") or "") or None,
-        "received_at": (latest_message or {}).get("created_at"),
-        "message": message,
-        "hint": hint,
+        "status": result.get("status"),
+        "email": result.get("email"),
+        "verification_code": result.get("verification_code"),
+        "subject": result.get("latest_subject"),
+        "message_id": result.get("latest_message_id"),
+        "received_at": result.get("latest_received_at"),
+        "message": result.get("message"),
+        "hint": result.get("hint"),
     }
 
 

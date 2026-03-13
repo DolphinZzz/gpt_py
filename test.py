@@ -1334,6 +1334,242 @@ def run_registered_account_flow(
     return {"ok": False, "status": "pending", "output": str(out_file), "result": result}
 
 
+def _payment_link_value(result: dict | None, key: str) -> str:
+    if not isinstance(result, dict):
+        return ""
+    return str(result.get(key) or "").strip()
+
+
+def _payment_link_score(result: dict | None) -> int:
+    return int(bool(_payment_link_value(result, "checkout_url"))) + int(bool(_payment_link_value(result, "stripe_hosted_url")))
+
+
+def _payment_link_status(result: dict | None, key: str) -> int:
+    if not isinstance(result, dict):
+        return 0
+    item = result.get(key) or {}
+    try:
+        return int(item.get("status") or 0)
+    except Exception:
+        return 0
+
+
+def _restore_session_from_browser_state(reg, state_file: Path) -> int:
+    try:
+        raw = json.loads(state_file.read_text(encoding="utf-8"))
+    except Exception:
+        return 0
+
+    cookies = raw.get("cookies") if isinstance(raw, dict) else None
+    if not isinstance(cookies, list):
+        return 0
+
+    restored = 0
+    for item in cookies:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        value = str(item.get("value") or "").strip()
+        domain = str(item.get("domain") or "").strip()
+        path = str(item.get("path") or "/").strip() or "/"
+        if not name or not value or not domain:
+            continue
+        try:
+            reg.session.cookies.set(name, value, domain=domain, path=path)
+            restored += 1
+        except Exception:
+            continue
+    return restored
+
+
+def get_registered_account_payment_links(
+    *,
+    email: str,
+    password: str,
+    proxy: str | None,
+    mail_token: str | None,
+    output_dir: str | Path | None = None,
+    tag: str = "",
+    existing_reg=None,
+    existing_tokens: dict[str, Any] | None = None,
+) -> dict:
+    output_base = Path(output_dir or Path.cwd()).resolve()
+    output_base.mkdir(parents=True, exist_ok=True)
+
+    stem = _safe_output_stem(email, default="registered_account")
+    out_file = output_base / f"{stem}_payment_links.json"
+    auth_cache_file = output_base / f"{stem}_auth_cache.json"
+    browser_state_file = output_base / f"{stem}_browser_state.json"
+    log_tag = str(tag or stem)
+
+    best_result: dict | None = None
+    best_score = -1
+    errors: list[str] = []
+
+    def _remember(result: dict | None):
+        nonlocal best_result, best_score
+        score = _payment_link_score(result)
+        if score > best_score:
+            best_result = result if isinstance(result, dict) else None
+            best_score = score
+
+    def _invoke(
+        existing_reg_arg=None,
+        existing_tokens_arg: dict[str, Any] | None = None,
+        *,
+        no_auth_cache: bool,
+        refresh_auth: bool,
+    ):
+        return _run_protocol_only(
+            email=email,
+            password=password,
+            out_file=out_file,
+            proxy=proxy,
+            checkout_payload_json="",
+            openai_sentinel_token="",
+            stripe_confirm_url="",
+            stripe_confirm_payload_b64="",
+            max_wait_ms=15000,
+            mail_token=mail_token,
+            mail_password=None,
+            auth_cache_file=auth_cache_file,
+            browser_state_file=browser_state_file,
+            no_auth_cache=no_auth_cache,
+            refresh_auth=refresh_auth,
+            skip_runtime_capture=True,
+            stripe_open_mode="system",
+            existing_reg=existing_reg_arg,
+            existing_tokens=existing_tokens_arg,
+            open_stripe_hosted_url=False,
+            log_tag=log_tag,
+        )
+
+    def _new_reg(reason: str) -> Any:
+        reg = chatgpt_register.ChatGPTRegister(proxy=proxy or "", tag=log_tag or "payment-link")
+        if reason:
+            reg._print(f"[payment-link] {reason} -> {reg.impersonate} ({reg.chrome_full})")
+        return reg
+
+    def _attempt_with_session(existing_tokens_arg: dict[str, Any], label: str, *, allow_browser_state: bool) -> bool:
+        session_candidates: list[Any] = []
+
+        if existing_reg is not None:
+            session_candidates.append(existing_reg)
+
+        if allow_browser_state and browser_state_file.exists():
+            restored_reg = _new_reg("尝试复用历史 browser_state")
+            restored_count = _restore_session_from_browser_state(restored_reg, browser_state_file)
+            if restored_count > 0:
+                restored_reg._print(f"[payment-link] 已恢复 browser_state cookies: {restored_count}")
+                session_candidates.append(restored_reg)
+
+        session_candidates.append(_new_reg(f"{label} 尝试全新会话"))
+
+        for idx, reg_candidate in enumerate(session_candidates, start=1):
+            try:
+                result = _invoke(
+                    existing_reg_arg=reg_candidate,
+                    existing_tokens_arg=existing_tokens_arg,
+                    no_auth_cache=False,
+                    refresh_auth=False,
+                )
+                _remember(result)
+                if _payment_link_score(result) >= 2:
+                    return True
+                errors.append(
+                    f"{label} attempt {idx} incomplete: "
+                    f"checkout_status={_payment_link_status(result, 'checkout_result') or 'unknown'}, "
+                    f"stripe_init_status={_payment_link_status(result, 'stripe_init_result') or 'unknown'}"
+                )
+            except Exception as e:
+                errors.append(f"{label} attempt {idx} failed: {e}")
+        return False
+
+    def _attempt_login(max_attempts: int = 3) -> bool:
+        for attempt in range(1, max_attempts + 1):
+            try:
+                result = _invoke(
+                    existing_reg_arg=None,
+                    existing_tokens_arg=None,
+                    no_auth_cache=False,
+                    refresh_auth=attempt > 1,
+                )
+                _remember(result)
+                if _payment_link_score(result) >= 1:
+                    return True
+                errors.append(
+                    f"login attempt {attempt} incomplete: "
+                    f"checkout_status={_payment_link_status(result, 'checkout_result') or 'unknown'}, "
+                    f"stripe_init_status={_payment_link_status(result, 'stripe_init_result') or 'unknown'}"
+                )
+            except Exception as e:
+                errors.append(f"login attempt {attempt} failed: {e}")
+        return False
+
+    token_access = str((existing_tokens or {}).get("access_token") or "").strip()
+    if token_access:
+        if _attempt_with_session(existing_tokens, "token path", allow_browser_state=True) and best_score >= 2:
+            result = best_result if isinstance(best_result, dict) else {}
+            return {
+                "ok": True,
+                "status": "ok",
+                "output": str(out_file),
+                "checkout_url": _payment_link_value(result, "checkout_url"),
+                "stripe_hosted_url": _payment_link_value(result, "stripe_hosted_url"),
+                "issues": [],
+                "result": result,
+            }
+
+    if best_score < 2:
+        _attempt_login(max_attempts=3)
+
+    result = best_result if isinstance(best_result, dict) else {}
+    checkout_url = _payment_link_value(result, "checkout_url")
+    stripe_hosted_url = _payment_link_value(result, "stripe_hosted_url")
+
+    issues: list[str] = []
+    checkout_result = result.get("checkout_result") if isinstance(result, dict) else {}
+    stripe_init_result = result.get("stripe_init_result") if isinstance(result, dict) else {}
+    checkout_status = int((checkout_result or {}).get("status") or 0)
+    stripe_init_status = int((stripe_init_result or {}).get("status") or 0)
+
+    if not checkout_url:
+        issues.append(f"checkout_url_missing(status={checkout_status or 'unknown'})")
+    if not stripe_hosted_url:
+        issues.append(f"stripe_hosted_url_missing(status={stripe_init_status or 'unknown'})")
+    if errors:
+        issues.extend(errors)
+
+    ok = bool(checkout_url or stripe_hosted_url)
+    if ok:
+        _print_and_log(
+            "info",
+            log_tag,
+            f"[payment-link] 已生成: {email} | openai={'ok' if checkout_url else 'missing'} | stripe={'ok' if stripe_hosted_url else 'missing'}",
+        )
+        return {
+            "ok": True,
+            "status": "ok",
+            "output": str(out_file),
+            "checkout_url": checkout_url,
+            "stripe_hosted_url": stripe_hosted_url,
+            "issues": issues,
+            "result": result,
+        }
+
+    error_msg = f"[payment-link] 获取失败: {email} | {', '.join(issues) or 'unknown error'}"
+    _print_and_log("error", log_tag, error_msg)
+    return {
+        "ok": False,
+        "status": "failed",
+        "output": str(out_file),
+        "checkout_url": checkout_url,
+        "stripe_hosted_url": stripe_hosted_url,
+        "issues": issues,
+        "result": result,
+    }
+
+
 def _body_to_bytes(body) -> bytes:
     if body is None:
         return b""

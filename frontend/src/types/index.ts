@@ -111,6 +111,15 @@ export interface RefreshAccountTokensResult {
   items: RefreshAccountTokenItem[]
 }
 
+export interface AccountPaymentLinksResult {
+  status: 'ok' | 'error'
+  checkout_url?: string
+  stripe_hosted_url?: string
+  output?: string
+  issues?: string[]
+  proxy_warning?: string | null
+}
+
 export interface MailboxCodeResult {
   status: 'ok' | 'pending'
   email: string

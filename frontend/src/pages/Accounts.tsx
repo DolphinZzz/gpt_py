@@ -1,11 +1,11 @@
 import { useEffect, useState } from 'react'
 import type { ChangeEvent } from 'react'
 import { DownloadOutlined } from '@ant-design/icons'
-import { Alert, Button, Card, Input, Select, Space, Table, Tag, Typography, message } from 'antd'
-import { getAccounts, getTaskHistory, queryMailboxCode, refreshAccountTokens } from '../api'
-import type { Account, HistoryRun, MailboxCodeResult, RefreshAccountTokenItem } from '../types'
+import { Alert, Button, Card, Input, Modal, Select, Space, Table, Tag, Typography, message } from 'antd'
+import { getAccountPaymentLinks, getAccounts, getTaskHistory, queryMailboxCode, refreshAccountTokens } from '../api'
+import type { Account, AccountPaymentLinksResult, HistoryRun, MailboxCodeResult, RefreshAccountTokenItem } from '../types'
 
-const { Text } = Typography
+const { Paragraph, Text } = Typography
 const ALL_RUNS_VALUE = '__all__'
 
 function escapeCsvCell(value: unknown) {
@@ -29,6 +29,7 @@ export default function Accounts() {
   const [queryingMailCode, setQueryingMailCode] = useState(false)
   const [refreshingAllTokens, setRefreshingAllTokens] = useState(false)
   const [refreshingRowKeys, setRefreshingRowKeys] = useState<Record<string, boolean>>({})
+  const [paymentLinkRowKeys, setPaymentLinkRowKeys] = useState<Record<string, boolean>>({})
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
@@ -219,6 +220,85 @@ export default function Accounts() {
     message.success(`已导出 ${filtered.length} 条账号记录`)
   }
 
+  const showPaymentLinkModal = async (
+    title: string,
+    url: string,
+    result: AccountPaymentLinksResult,
+  ) => {
+    let copied = false
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(url)
+        copied = true
+      }
+    } catch {
+      copied = false
+    }
+
+    Modal.info({
+      title,
+      width: 720,
+      content: (
+        <Space direction="vertical" size={12} style={{ width: '100%' }}>
+          <Text type="secondary">
+            {copied ? '链接已自动复制到剪贴板。' : '已获取链接，可直接复制使用。'}
+          </Text>
+          <Paragraph copyable={{ text: url }} style={{ marginBottom: 0, wordBreak: 'break-all' }}>
+            {url}
+          </Paragraph>
+          {result.output ? <Text type="secondary">输出文件: {result.output}</Text> : null}
+        </Space>
+      ),
+    })
+  }
+
+  const handleFetchPaymentLink = async (record: Account, target: 'stripe' | 'openai') => {
+    const rowKey = getAccountKey(record)
+    setPaymentLinkRowKeys(prev => ({ ...prev, [rowKey]: true }))
+
+    try {
+      const { data } = await getAccountPaymentLinks({
+        email: record.email,
+        password: record.password,
+        run_id: record.run_id,
+        line_no: record.line_no,
+        mail_token: record.mail_token,
+        access_token: record.access_token,
+        refresh_token: record.refresh_token,
+        id_token: record.id_token,
+      })
+
+      if (data.proxy_warning) {
+        message.warning(data.proxy_warning)
+      }
+
+      const url = target === 'stripe'
+        ? String(data.stripe_hosted_url || '').trim()
+        : String(data.checkout_url || '').trim()
+
+      if (!url) {
+        const fallback = target === 'stripe' ? 'Stripe' : 'OpenAI'
+        message.error(`${fallback} 付款链接获取失败`)
+        return
+      }
+
+      await showPaymentLinkModal(
+        target === 'stripe' ? 'Stripe 付款链接' : 'OpenAI 付款链接',
+        url,
+        data,
+      )
+    } catch (e: any) {
+      const detail = e.response?.data?.detail || '获取付款链接失败'
+      message.error(detail)
+    } finally {
+      setPaymentLinkRowKeys(prev => {
+        const next = { ...prev }
+        delete next[rowKey]
+        return next
+      })
+    }
+  }
+
   const columns = [
     {
       title: '批次',
@@ -286,21 +366,37 @@ export default function Accounts() {
     {
       title: '操作',
       key: 'actions',
-      width: 120,
+      width: 150,
       fixed: 'right' as const,
       render: (_: unknown, record: Account) => {
         const rowKey = getAccountKey(record)
         return (
-          <Button
-            size="small"
-            type="primary"
-            ghost
-            loading={!!refreshingRowKeys[rowKey]}
-            disabled={!record.refresh_token || refreshingAllTokens}
-            onClick={() => void handleRefreshTokens([record], rowKey)}
-          >
-            更新 Token
-          </Button>
+          <Space direction="vertical" size={6} style={{ width: '100%' }}>
+            <Button
+              size="small"
+              type="primary"
+              ghost
+              loading={!!refreshingRowKeys[rowKey]}
+              disabled={!record.refresh_token || refreshingAllTokens}
+              onClick={() => void handleRefreshTokens([record], rowKey)}
+            >
+              更新 Token
+            </Button>
+            <Button
+              size="small"
+              loading={!!paymentLinkRowKeys[rowKey]}
+              onClick={() => void handleFetchPaymentLink(record, 'stripe')}
+            >
+              Stripe 链接
+            </Button>
+            <Button
+              size="small"
+              loading={!!paymentLinkRowKeys[rowKey]}
+              onClick={() => void handleFetchPaymentLink(record, 'openai')}
+            >
+              OpenAI 链接
+            </Button>
+          </Space>
         )
       },
     },

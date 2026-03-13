@@ -1,6 +1,7 @@
 import axios from 'axios'
 import { useEffect, useRef, useCallback, useState } from 'react'
 import type {
+  AccountPaymentLinksResult,
   Config,
   LogEntry,
   ConvertRequest,
@@ -32,6 +33,18 @@ export const refreshAccountTokens = (data: {
   proxy?: string
 }) =>
   api.post<RefreshAccountTokensResult>('/accounts/refresh-tokens', data)
+export const getAccountPaymentLinks = (data: {
+  email: string
+  password: string
+  run_id?: string
+  line_no?: number
+  mail_token?: string
+  access_token?: string
+  refresh_token?: string
+  id_token?: string
+  proxy?: string
+}) =>
+  api.post<AccountPaymentLinksResult>('/accounts/payment-links', data)
 export const queryMailboxCode = (data: { mail_token: string; timeout?: number }) =>
   api.post<MailboxCodeResult>('/mailbox/code', data)
 export const getStats = () => api.get('/stats')

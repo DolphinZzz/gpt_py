@@ -6,6 +6,7 @@ ChatGPT 批量注册工具 - FastAPI 后端
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import re
 import json
@@ -36,6 +37,8 @@ CONFIG_PATH = BASE_DIR / "config.json"
 RESULTS_DIR_NAME = "results"
 SUB2API_OUTPUT_NAME = "sub2api_accounts.csv"
 LEGACY_SUB2API_OUTPUT_NAME = "sub2api_accounts.json"
+_test_module_cache = None
+_test_module_lock = threading.Lock()
 
 
 def _parse_proxy_endpoint(raw_proxy: str) -> Optional[tuple[str, int]]:
@@ -70,6 +73,26 @@ def _resolve_runtime_proxy(raw_proxy: str) -> tuple[str, Optional[str]]:
     except OSError as e:
         detail = str(e).strip() or e.__class__.__name__
         return "", f"本地代理 {proxy} 不可用（{detail}），本次任务已自动改为直连。"
+
+
+def _load_test_module():
+    global _test_module_cache
+    if _test_module_cache is not None:
+        return _test_module_cache
+
+    with _test_module_lock:
+        if _test_module_cache is not None:
+            return _test_module_cache
+
+        module_path = BASE_DIR / "test.py"
+        spec = importlib.util.spec_from_file_location("gpt_py_test_module", module_path)
+        if spec is None or spec.loader is None:
+            raise RuntimeError(f"无法加载 test.py: {module_path}")
+
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _test_module_cache = module
+        return module
 
 
 # ==================== Pydantic Models ====================
@@ -149,6 +172,18 @@ class AccountTokenRefreshItem(BaseModel):
 
 class RefreshAccountTokensRequest(BaseModel):
     accounts: list[AccountTokenRefreshItem]
+    proxy: Optional[str] = None
+
+
+class AccountPaymentLinksRequest(BaseModel):
+    email: str
+    password: str
+    run_id: Optional[str] = None
+    line_no: Optional[int] = None
+    mail_token: Optional[str] = None
+    access_token: Optional[str] = None
+    refresh_token: Optional[str] = None
+    id_token: Optional[str] = None
     proxy: Optional[str] = None
 
 
@@ -1429,6 +1464,89 @@ def refresh_account_tokens(req: RefreshAccountTokensRequest):
         "fail_count": len(results) - success_count,
         "proxy_warning": proxy_warning,
         "items": results,
+    }
+
+
+@app.post("/api/accounts/payment-links")
+def account_payment_links(req: AccountPaymentLinksRequest):
+    email = str(req.email or "").strip()
+    password = str(req.password or "").strip()
+    run_id = str(req.run_id or "").strip()
+    mail_token = str(req.mail_token or "").strip() or None
+
+    if not email or not password:
+        raise HTTPException(400, "缺少 email / password")
+
+    run_dir = None
+    if run_id:
+        run_dir = _locate_run_dir(run_id)
+        if not run_dir:
+            raise HTTPException(404, f"批次目录不存在: {run_id}")
+
+    config = _load_config()
+    raw_proxy = req.proxy if req.proxy is not None else str(config.get("proxy", "") or "")
+    proxy, proxy_warning = _resolve_runtime_proxy(raw_proxy)
+
+    access_token = str(req.access_token or "").strip()
+    refresh_token = str(req.refresh_token or "").strip()
+    id_token = str(req.id_token or "").strip()
+
+    if not access_token and refresh_token:
+        try:
+            client = chatgpt_register.ChatGPTRegister(proxy=proxy or None, tag="payment-link")
+            refreshed = _refresh_codex_tokens(client, refresh_token)
+            access_token = str(refreshed.get("access_token") or "").strip()
+            refresh_token = str(refreshed.get("refresh_token") or "").strip() or refresh_token
+            id_token = str(refreshed.get("id_token") or "").strip() or id_token
+        except Exception:
+            pass
+
+    existing_tokens: dict[str, str] = {}
+    if access_token:
+        existing_tokens["access_token"] = access_token
+    if refresh_token:
+        existing_tokens["refresh_token"] = refresh_token
+    if id_token:
+        existing_tokens["id_token"] = id_token
+
+    try:
+        module = _load_test_module()
+    except Exception as e:
+        raise HTTPException(500, f"加载付款链路模块失败: {e}") from e
+
+    runner = getattr(module, "get_registered_account_payment_links", None)
+    if not callable(runner):
+        raise HTTPException(500, "test.py 未提供 get_registered_account_payment_links")
+
+    output_dir = run_dir or (BASE_DIR / RESULTS_DIR_NAME / "_manual_payment_links")
+
+    try:
+        result = runner(
+            email=email,
+            password=password,
+            proxy=proxy or None,
+            mail_token=mail_token,
+            output_dir=output_dir,
+            tag=f"payment-link:{run_id or email}",
+            existing_tokens=existing_tokens or None,
+        )
+    except Exception as e:
+        raise HTTPException(500, f"获取付款链接失败: {e}") from e
+
+    if not bool((result or {}).get("ok")):
+        issues = result.get("issues") if isinstance(result, dict) else []
+        detail = ", ".join(str(item).strip() for item in issues if str(item).strip())
+        if not detail:
+            detail = str((result or {}).get("error") or "").strip() or "未生成可用付款链接"
+        raise HTTPException(500, f"获取付款链接失败: {detail}")
+
+    return {
+        "status": "ok",
+        "checkout_url": str((result or {}).get("checkout_url") or "").strip(),
+        "stripe_hosted_url": str((result or {}).get("stripe_hosted_url") or "").strip(),
+        "output": str((result or {}).get("output") or "").strip(),
+        "issues": result.get("issues") if isinstance(result, dict) else [],
+        "proxy_warning": proxy_warning,
     }
 
 

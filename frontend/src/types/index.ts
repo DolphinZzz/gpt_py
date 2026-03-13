@@ -120,6 +120,22 @@ export interface AccountPaymentLinksResult {
   proxy_warning?: string | null
 }
 
+export interface ExportStripeLinksItem {
+  run_id: string
+  output_file?: string
+  success_count: number
+  fail_count: number
+  failures?: string[]
+}
+
+export interface ExportStripeLinksResult {
+  status: 'ok' | 'error'
+  success_count: number
+  fail_count: number
+  proxy_warning?: string | null
+  items: ExportStripeLinksItem[]
+}
+
 export interface MailboxCodeResult {
   status: 'ok' | 'pending'
   email: string

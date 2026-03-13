@@ -1,7 +1,7 @@
 """
 ChatGPT 批量注册工具 - FastAPI 后端
 启动: python main.py
-访问: http://localhost:8000
+访问: http://localhost:18000
 """
 
 from __future__ import annotations
@@ -184,6 +184,11 @@ class AccountPaymentLinksRequest(BaseModel):
     access_token: Optional[str] = None
     refresh_token: Optional[str] = None
     id_token: Optional[str] = None
+    proxy: Optional[str] = None
+
+
+class ExportStripeLinksRequest(BaseModel):
+    run_id: Optional[str] = None
     proxy: Optional[str] = None
 
 
@@ -672,6 +677,164 @@ def _locate_run_dir(run_id: str) -> Optional[Path]:
         if candidate.exists() and candidate.is_dir():
             return candidate
     return None
+
+
+def _write_stripe_payment_links(output_file: Path, lines: list[str]) -> str:
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    deduped_lines: list[str] = []
+    seen_emails: set[str] = set()
+    for raw_line in lines:
+        line = str(raw_line or "").strip()
+        if "----" not in line:
+            continue
+        email = line.split("----", 1)[0].strip().lower()
+        if not email or email in seen_emails:
+            continue
+        seen_emails.add(email)
+        deduped_lines.append(line)
+    output_file.write_text(("\n".join(deduped_lines).strip() + "\n") if deduped_lines else "", encoding="utf-8")
+    return str(output_file)
+
+
+def _resolve_payment_link_runner():
+    try:
+        module = _load_test_module()
+    except Exception as e:
+        raise HTTPException(500, f"加载付款链路模块失败: {e}") from e
+
+    runner = getattr(module, "get_registered_account_payment_links", None)
+    if not callable(runner):
+        raise HTTPException(500, "test.py 未提供 get_registered_account_payment_links")
+    return runner
+
+
+def _resolve_payment_link_proxy(proxy_override: Optional[str]) -> tuple[str, Optional[str]]:
+    config = _load_config()
+    raw_proxy = proxy_override if proxy_override is not None else str(config.get("proxy", "") or "")
+    return _resolve_runtime_proxy(raw_proxy)
+
+
+def _run_payment_link_fetch(
+    runner,
+    *,
+    email: str,
+    password: str,
+    proxy: str,
+    output_dir: Path,
+    tag: str,
+    mail_token: Optional[str] = None,
+    access_token: str = "",
+    refresh_token: str = "",
+    id_token: str = "",
+):
+    access_token = str(access_token or "").strip()
+    refresh_token = str(refresh_token or "").strip()
+    id_token = str(id_token or "").strip()
+
+    if not access_token and refresh_token:
+        try:
+            client = chatgpt_register.ChatGPTRegister(proxy=proxy or None, tag="payment-link")
+            refreshed = _refresh_codex_tokens(client, refresh_token)
+            access_token = str(refreshed.get("access_token") or "").strip()
+            refresh_token = str(refreshed.get("refresh_token") or "").strip() or refresh_token
+            id_token = str(refreshed.get("id_token") or "").strip() or id_token
+        except Exception:
+            pass
+
+    existing_tokens: dict[str, str] = {}
+    if access_token:
+        existing_tokens["access_token"] = access_token
+    if refresh_token:
+        existing_tokens["refresh_token"] = refresh_token
+    if id_token:
+        existing_tokens["id_token"] = id_token
+
+    return runner(
+        email=str(email or "").strip(),
+        password=str(password or "").strip(),
+        proxy=proxy or None,
+        mail_token=str(mail_token or "").strip() or None,
+        output_dir=output_dir,
+        tag=tag,
+        existing_tokens=existing_tokens or None,
+    )
+
+
+def _export_stripe_links_for_runs(run_id: Optional[str] = None, proxy_override: Optional[str] = None) -> dict:
+    runner = _resolve_payment_link_runner()
+    proxy, proxy_warning = _resolve_payment_link_proxy(proxy_override)
+    runs = _resolve_account_runs(str(run_id or "").strip() or None)
+    if not runs:
+        raise HTTPException(404, "未找到可导出的批次")
+
+    export_items: list[dict[str, Any]] = []
+    total_success = 0
+    total_fail = 0
+
+    for run in runs:
+        current_run_id = str(run.get("run_id") or "").strip()
+        run_path = Path(str(run.get("path") or "")).resolve()
+        accounts = _parse_accounts(current_run_id)
+        lines: list[str] = []
+        success_count = 0
+        fail_count = 0
+        failures: list[str] = []
+
+        for account in accounts:
+            email = str(account.get("email") or "").strip()
+            password = str(account.get("password") or "").strip()
+            if not email or not password:
+                fail_count += 1
+                failures.append(f"{email or 'unknown'}: missing_credentials")
+                continue
+
+            try:
+                result = _run_payment_link_fetch(
+                    runner,
+                    email=email,
+                    password=password,
+                    proxy=proxy,
+                    output_dir=run_path,
+                    tag=f"payment-link-export:{current_run_id}:{email}",
+                    mail_token=str(account.get("mail_token") or "").strip() or None,
+                    access_token=str(account.get("access_token") or "").strip(),
+                    refresh_token=str(account.get("refresh_token") or "").strip(),
+                    id_token=str(account.get("id_token") or "").strip(),
+                )
+            except Exception as e:
+                fail_count += 1
+                failures.append(f"{email}: {e}")
+                continue
+
+            stripe_hosted_url = str((result or {}).get("stripe_hosted_url") or "").strip()
+            if stripe_hosted_url:
+                lines.append(f"{email}----{stripe_hosted_url}")
+                success_count += 1
+            else:
+                fail_count += 1
+                issues = result.get("issues") if isinstance(result, dict) else []
+                detail = ", ".join(str(item).strip() for item in issues if str(item).strip()) or "stripe_hosted_url_missing"
+                failures.append(f"{email}: {detail}")
+
+        output_file = _write_stripe_payment_links(run_path / "stripe_payment_links.txt", lines)
+
+        export_items.append({
+            "run_id": current_run_id,
+            "output_file": output_file,
+            "success_count": success_count,
+            "fail_count": fail_count,
+            "failures": failures[:20],
+        })
+        total_success += success_count
+        total_fail += fail_count
+
+    return {
+        "status": "ok",
+        "proxy_warning": proxy_warning,
+        "success_count": total_success,
+        "fail_count": total_fail,
+        "items": export_items,
+    }
 
 
 def _has_non_empty_file(path: Path) -> bool:
@@ -1483,52 +1646,22 @@ def account_payment_links(req: AccountPaymentLinksRequest):
         if not run_dir:
             raise HTTPException(404, f"批次目录不存在: {run_id}")
 
-    config = _load_config()
-    raw_proxy = req.proxy if req.proxy is not None else str(config.get("proxy", "") or "")
-    proxy, proxy_warning = _resolve_runtime_proxy(raw_proxy)
-
-    access_token = str(req.access_token or "").strip()
-    refresh_token = str(req.refresh_token or "").strip()
-    id_token = str(req.id_token or "").strip()
-
-    if not access_token and refresh_token:
-        try:
-            client = chatgpt_register.ChatGPTRegister(proxy=proxy or None, tag="payment-link")
-            refreshed = _refresh_codex_tokens(client, refresh_token)
-            access_token = str(refreshed.get("access_token") or "").strip()
-            refresh_token = str(refreshed.get("refresh_token") or "").strip() or refresh_token
-            id_token = str(refreshed.get("id_token") or "").strip() or id_token
-        except Exception:
-            pass
-
-    existing_tokens: dict[str, str] = {}
-    if access_token:
-        existing_tokens["access_token"] = access_token
-    if refresh_token:
-        existing_tokens["refresh_token"] = refresh_token
-    if id_token:
-        existing_tokens["id_token"] = id_token
-
-    try:
-        module = _load_test_module()
-    except Exception as e:
-        raise HTTPException(500, f"加载付款链路模块失败: {e}") from e
-
-    runner = getattr(module, "get_registered_account_payment_links", None)
-    if not callable(runner):
-        raise HTTPException(500, "test.py 未提供 get_registered_account_payment_links")
-
+    runner = _resolve_payment_link_runner()
+    proxy, proxy_warning = _resolve_payment_link_proxy(req.proxy)
     output_dir = run_dir or (BASE_DIR / RESULTS_DIR_NAME / "_manual_payment_links")
 
     try:
-        result = runner(
+        result = _run_payment_link_fetch(
+            runner,
             email=email,
             password=password,
-            proxy=proxy or None,
-            mail_token=mail_token,
+            proxy=proxy,
             output_dir=output_dir,
             tag=f"payment-link:{run_id or email}",
-            existing_tokens=existing_tokens or None,
+            mail_token=mail_token,
+            access_token=str(req.access_token or "").strip(),
+            refresh_token=str(req.refresh_token or "").strip(),
+            id_token=str(req.id_token or "").strip(),
         )
     except Exception as e:
         raise HTTPException(500, f"获取付款链接失败: {e}") from e
@@ -1540,14 +1673,20 @@ def account_payment_links(req: AccountPaymentLinksRequest):
             detail = str((result or {}).get("error") or "").strip() or "未生成可用付款链接"
         raise HTTPException(500, f"获取付款链接失败: {detail}")
 
+    stripe_hosted_url = str((result or {}).get("stripe_hosted_url") or "").strip()
     return {
         "status": "ok",
         "checkout_url": str((result or {}).get("checkout_url") or "").strip(),
-        "stripe_hosted_url": str((result or {}).get("stripe_hosted_url") or "").strip(),
+        "stripe_hosted_url": stripe_hosted_url,
         "output": str((result or {}).get("output") or "").strip(),
         "issues": result.get("issues") if isinstance(result, dict) else [],
         "proxy_warning": proxy_warning,
     }
+
+
+@app.post("/api/accounts/export-stripe-links")
+def export_stripe_links(req: ExportStripeLinksRequest):
+    return _export_stripe_links_for_runs(run_id=req.run_id, proxy_override=req.proxy)
 
 
 @app.post("/api/mailbox/code")

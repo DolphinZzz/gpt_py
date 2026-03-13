@@ -2,8 +2,8 @@ import { useEffect, useState } from 'react'
 import type { ChangeEvent } from 'react'
 import { DownloadOutlined } from '@ant-design/icons'
 import { Alert, Button, Card, Input, Modal, Select, Space, Table, Tag, Typography, message } from 'antd'
-import { getAccountPaymentLinks, getAccounts, getTaskHistory, queryMailboxCode, refreshAccountTokens } from '../api'
-import type { Account, AccountPaymentLinksResult, HistoryRun, MailboxCodeResult, RefreshAccountTokenItem } from '../types'
+import { exportStripeLinks, getAccountPaymentLinks, getAccounts, getTaskHistory, queryMailboxCode, refreshAccountTokens } from '../api'
+import type { Account, AccountPaymentLinksResult, ExportStripeLinksResult, HistoryRun, MailboxCodeResult, RefreshAccountTokenItem } from '../types'
 
 const { Paragraph, Text } = Typography
 const ALL_RUNS_VALUE = '__all__'
@@ -30,6 +30,7 @@ export default function Accounts() {
   const [refreshingAllTokens, setRefreshingAllTokens] = useState(false)
   const [refreshingRowKeys, setRefreshingRowKeys] = useState<Record<string, boolean>>({})
   const [paymentLinkRowKeys, setPaymentLinkRowKeys] = useState<Record<string, boolean>>({})
+  const [exportingStripeLinks, setExportingStripeLinks] = useState(false)
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
@@ -252,6 +253,51 @@ export default function Accounts() {
     })
   }
 
+  const showStripeExportResult = (result: ExportStripeLinksResult) => {
+    const content = (
+      <Space direction="vertical" size={10} style={{ width: '100%' }}>
+        <Text>成功 {result.success_count} 条，失败 {result.fail_count} 条</Text>
+        {result.items.map(item => (
+          <Space key={item.run_id} direction="vertical" size={2} style={{ width: '100%' }}>
+            <Text strong>{item.run_id}</Text>
+            <Text type="secondary">输出文件: {item.output_file || '未生成'}</Text>
+            <Text type="secondary">成功 {item.success_count} / 失败 {item.fail_count}</Text>
+          </Space>
+        ))}
+      </Space>
+    )
+
+    Modal.info({
+      title: selectedRun === ALL_RUNS_VALUE ? '所有批次 Stripe 链接导出结果' : '当前批次 Stripe 链接导出结果',
+      width: 720,
+      content,
+    })
+  }
+
+  const handleExportStripeLinks = async () => {
+    const hasRunnableAccounts = filtered.some(account => account.run_id && account.password)
+    if (!hasRunnableAccounts) {
+      message.warning('当前没有可导出的批次账号')
+      return
+    }
+
+    setExportingStripeLinks(true)
+    try {
+      const { data } = await exportStripeLinks(
+        selectedRun === ALL_RUNS_VALUE ? {} : { run_id: selectedRun },
+      )
+      if (data.proxy_warning) {
+        message.warning(data.proxy_warning)
+      }
+      showStripeExportResult(data)
+    } catch (e: any) {
+      const detail = e.response?.data?.detail || '导出 Stripe 链接失败'
+      message.error(detail)
+    } finally {
+      setExportingStripeLinks(false)
+    }
+  }
+
   const handleFetchPaymentLink = async (record: Account, target: 'stripe' | 'openai') => {
     const rowKey = getAccountKey(record)
     setPaymentLinkRowKeys(prev => ({ ...prev, [rowKey]: true }))
@@ -422,6 +468,13 @@ export default function Accounts() {
           onClick={() => void handleRefreshTokens(filtered)}
         >
           一键更新当前列表 Token
+        </Button>
+        <Button
+          loading={exportingStripeLinks}
+          disabled={!filtered.some(account => account.run_id && account.password)}
+          onClick={() => void handleExportStripeLinks()}
+        >
+          {selectedRun === ALL_RUNS_VALUE ? '导出所有批次 Stripe 链接' : '导出当前批次 Stripe 链接'}
         </Button>
         <Button icon={<DownloadOutlined />} onClick={handleExportCsv} disabled={!filtered.length}>
           导出当前列表 CSV

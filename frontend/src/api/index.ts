@@ -7,6 +7,7 @@ import type {
   ConvertRequest,
   ConvertResult,
   ConvertibleRun,
+  ExportStripeLinksResult,
   MailboxCodeResult,
   RefreshAccountTokensResult,
 } from '../types'
@@ -45,6 +46,8 @@ export const getAccountPaymentLinks = (data: {
   proxy?: string
 }) =>
   api.post<AccountPaymentLinksResult>('/accounts/payment-links', data)
+export const exportStripeLinks = (data?: { run_id?: string; proxy?: string }) =>
+  api.post<ExportStripeLinksResult>('/accounts/export-stripe-links', data || {})
 export const queryMailboxCode = (data: { mail_token: string; timeout?: number }) =>
   api.post<MailboxCodeResult>('/mailbox/code', data)
 export const getStats = () => api.get('/stats')

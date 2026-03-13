@@ -1,0 +1,7 @@
+{
+  "resend_api_base": "https://api.resend.com",
+  "resend_api_key": "re_xxx",
+  "resend_domain": "ilkoxpra.resend.app",
+  "getmail_host": "0.0.0.0",
+  "getmail_port": 8021
+}

@@ -39,6 +39,8 @@ export interface Config {
   payment_card_exp_year: string
   payment_card_cvc: string
   payment_profiles_json: string
+  payment_profiles_json_resolved?: string
+  payment_profiles_json_source?: string
 }
 
 export interface TaskStatus {
@@ -80,10 +82,33 @@ export interface Account {
   password: string
   email_password: string
   oauth_status: string
+  run_id?: string
+  run_timestamp?: string
+  line_no?: number
   mail_token?: string
   access_token?: string
   refresh_token?: string
   id_token?: string
+}
+
+export interface RefreshAccountTokenItem {
+  status: 'ok' | 'error'
+  email: string
+  run_id: string
+  line_no?: number
+  access_token?: string
+  refresh_token?: string
+  id_token?: string
+  expires_at?: string
+  message?: string
+}
+
+export interface RefreshAccountTokensResult {
+  status: 'ok' | 'error'
+  success_count: number
+  fail_count: number
+  proxy_warning?: string | null
+  items: RefreshAccountTokenItem[]
 }
 
 export interface MailboxCodeResult {

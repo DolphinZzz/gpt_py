@@ -34,7 +34,8 @@ from GetMail.mail_service import lookup_mailbox as getmail_lookup_mailbox
 BASE_DIR = Path(__file__).parent
 CONFIG_PATH = BASE_DIR / "config.json"
 RESULTS_DIR_NAME = "results"
-SUB2API_OUTPUT_NAME = "sub2api_accounts.json"
+SUB2API_OUTPUT_NAME = "sub2api_accounts.csv"
+LEGACY_SUB2API_OUTPUT_NAME = "sub2api_accounts.json"
 
 
 def _parse_proxy_endpoint(raw_proxy: str) -> Optional[tuple[str, int]]:
@@ -137,6 +138,18 @@ class ConvertRequest(BaseModel):
 class MailboxCodeQueryRequest(BaseModel):
     mail_token: str
     timeout: int = 15
+
+
+class AccountTokenRefreshItem(BaseModel):
+    run_id: str
+    email: str
+    refresh_token: str
+    line_no: Optional[int] = None
+
+
+class RefreshAccountTokensRequest(BaseModel):
+    accounts: list[AccountTokenRefreshItem]
+    proxy: Optional[str] = None
 
 
 # ==================== Task Manager ====================
@@ -316,16 +329,16 @@ class TaskManager:
             self.emit_log("error", "system", "自动转换失败: 未找到可导入账号")
             return
 
+        output_path = work_dir / SUB2API_OUTPUT_NAME
+        sub2api.write_helper_csv(output_path, accounts)
+        self.emit_log("info", "system", f"已自动导出 CSV: {output_path}")
+
         from datetime import timezone as tz
         output = {
             "exported_at": datetime.now(tz.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
             "proxies": [],
             "accounts": accounts,
         }
-
-        output_path = work_dir / "sub2api_accounts.json"
-        output_path.write_text(json.dumps(output, ensure_ascii=False, indent=2), encoding="utf-8")
-        self.emit_log("info", "system", f"已自动转换 sub2api: {output_path}")
 
         uploaded = _load_uploaded_token_fingerprints()
         pending_accounts, skipped_uploaded, skipped_duplicate = _pick_pending_accounts(accounts, uploaded)
@@ -567,6 +580,25 @@ def _save_config(data: dict):
     chatgpt_register.reload_config(data)
 
 
+def _resolve_optional_file_text(raw_value: Any, *, base_dir: Path | None = None) -> tuple[str, str]:
+    text = str(raw_value or "").strip()
+    if not text:
+        return "", ""
+
+    candidate = Path(text).expanduser()
+    if candidate.is_absolute():
+        resolved_candidate = candidate
+    else:
+        resolved_candidate = ((base_dir or BASE_DIR) / candidate).resolve()
+
+    if resolved_candidate.exists() and resolved_candidate.is_file():
+        try:
+            return resolved_candidate.read_text(encoding="utf-8"), str(resolved_candidate)
+        except Exception:
+            return text, ""
+    return text, ""
+
+
 def _resolve_compose_paths(config: dict) -> tuple[str, str]:
     project = Path(str(config.get("docker_project_dir", ".")))
     compose = Path(str(config.get("docker_compose_file", "docker-compose.yml")))
@@ -619,7 +651,7 @@ def _detect_convert_sources(work_dir: Path, config: dict) -> list[str]:
     rk_name = str(config.get("rk_file", "rk.txt"))
 
     tokens_dir = work_dir / token_dir_name
-    if _has_non_empty_file(work_dir / SUB2API_OUTPUT_NAME):
+    if _has_non_empty_file(work_dir / SUB2API_OUTPUT_NAME) or _has_non_empty_file(work_dir / LEGACY_SUB2API_OUTPUT_NAME):
         sources.append("sub2api_json")
     if tokens_dir.exists() and tokens_dir.is_dir() and any(tokens_dir.glob("*.json")):
         sources.append("codex_tokens")
@@ -732,7 +764,9 @@ def _collect_sub2api_accounts(work_dir: Path, source: str, config: dict) -> list
 
     for item in source_order:
         if item == "sub2api_json":
-            accounts = sub2api.collect_from_sub2api_json(work_dir / SUB2API_OUTPUT_NAME)
+            accounts = sub2api.collect_from_helper_csv(work_dir / SUB2API_OUTPUT_NAME)
+            if not accounts:
+                accounts = sub2api.collect_from_sub2api_json(work_dir / LEGACY_SUB2API_OUTPUT_NAME)
         elif item == "codex_tokens":
             tokens_dir = work_dir / config.get("token_json_dir", "codex_tokens")
             accounts = sub2api.collect_from_codex_tokens(tokens_dir) if tokens_dir.exists() and tokens_dir.is_dir() else []
@@ -961,57 +995,62 @@ def _scan_history() -> list[dict]:
     return runs
 
 
-def _parse_accounts(run_id: Optional[str] = None) -> list[dict]:
-    reg_file: Optional[Path] = None
+def _resolve_account_runs(run_id: Optional[str] = None) -> list[dict]:
     if run_id:
-        for root in _result_roots():
-            candidate = root / run_id / "registered_accounts.txt"
-            if candidate.exists():
-                reg_file = candidate
-                break
-    else:
-        # Find latest
-        history = _scan_history()
-        if not history:
+        located = _locate_run_dir(run_id)
+        if not located:
             return []
-        reg_file = Path(history[0]["path"]) / "registered_accounts.txt"
+        timestamp = run_id
+        try:
+            timestamp = datetime.strptime(run_id[:15], "%Y%m%d_%H%M%S").strftime("%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            pass
+        return [{"run_id": run_id, "path": str(located), "timestamp": timestamp}]
+    return _scan_history()
 
-    if not reg_file or not reg_file.exists():
-        return []
 
+def _parse_accounts(run_id: Optional[str] = None) -> list[dict]:
     accounts = []
-    for line in reg_file.read_text("utf-8").splitlines():
-        line = line.strip()
-        if not line:
+    for run in _resolve_account_runs(run_id):
+        reg_file = Path(str(run.get("path", ""))) / "registered_accounts.txt"
+        if not reg_file.exists():
             continue
-        parts = line.split("----")
-        acc = {
-            "email": parts[0] if len(parts) > 0 else "",
-            "password": parts[1] if len(parts) > 1 else "",
-            "email_password": "",
-            "oauth_status": "",
-        }
-        extra_parts = []
-        if len(parts) > 2:
-            third = parts[2]
-            if "=" not in third:
-                acc["email_password"] = third
-                extra_parts = parts[3:]
-            else:
-                extra_parts = parts[2:]
 
-        for p in extra_parts:
-            if p.startswith("oauth="):
-                acc["oauth_status"] = p[6:]
-            elif p.startswith("mail_token="):
-                acc["mail_token"] = p[11:]
-            if p.startswith("access_token="):
-                acc["access_token"] = p[13:]
-            elif p.startswith("refresh_token="):
-                acc["refresh_token"] = p[14:]
-            elif p.startswith("id_token="):
-                acc["id_token"] = p[9:]
-        accounts.append(acc)
+        for line_no, raw_line in enumerate(reg_file.read_text("utf-8").splitlines(), start=1):
+            line = raw_line.strip()
+            if not line:
+                continue
+            parts = line.split("----")
+            acc = {
+                "email": parts[0] if len(parts) > 0 else "",
+                "password": parts[1] if len(parts) > 1 else "",
+                "email_password": "",
+                "oauth_status": "",
+                "run_id": str(run.get("run_id") or ""),
+                "run_timestamp": str(run.get("timestamp") or ""),
+                "line_no": line_no,
+            }
+            extra_parts = []
+            if len(parts) > 2:
+                third = parts[2]
+                if "=" not in third:
+                    acc["email_password"] = third
+                    extra_parts = parts[3:]
+                else:
+                    extra_parts = parts[2:]
+
+            for p in extra_parts:
+                if p.startswith("oauth="):
+                    acc["oauth_status"] = p[6:]
+                elif p.startswith("mail_token="):
+                    acc["mail_token"] = p[11:]
+                if p.startswith("access_token="):
+                    acc["access_token"] = p[13:]
+                elif p.startswith("refresh_token="):
+                    acc["refresh_token"] = p[14:]
+                elif p.startswith("id_token="):
+                    acc["id_token"] = p[9:]
+            accounts.append(acc)
     return accounts
 
 
@@ -1030,6 +1069,164 @@ def _query_mailbox_code(mail_token: str, timeout: int = 15) -> dict:
         "message": result.get("message"),
         "hint": result.get("hint"),
     }
+
+
+def _refresh_codex_tokens(client, refresh_token: str) -> dict:
+    token_resp = client.session.post(
+        f"{chatgpt_register.OAUTH_ISSUER}/oauth/token",
+        headers={"Content-Type": "application/x-www-form-urlencoded", "User-Agent": client.ua},
+        data={
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "client_id": chatgpt_register.OAUTH_CLIENT_ID,
+            "redirect_uri": chatgpt_register.OAUTH_REDIRECT_URI,
+        },
+        timeout=60,
+        impersonate=client.impersonate,
+    )
+    if token_resp.status_code != 200:
+        detail = (token_resp.text or "")[:200].strip()
+        raise RuntimeError(f"刷新失败: {token_resp.status_code} {detail}".strip())
+
+    try:
+        data = token_resp.json()
+    except Exception as e:
+        raise RuntimeError(f"刷新响应解析失败: {e}") from e
+
+    access_token = str(data.get("access_token") or "").strip()
+    if not access_token:
+        raise RuntimeError("刷新响应缺少 access_token")
+
+    refreshed_token = str(data.get("refresh_token") or "").strip()
+    if not refreshed_token:
+        data["refresh_token"] = refresh_token
+    return data
+
+
+def _update_registered_account_tokens(
+    run_id: str,
+    email: str,
+    access_token: str,
+    refresh_token: str,
+    id_token: str,
+    line_no: Optional[int] = None,
+) -> Path:
+    run_dir = _locate_run_dir(run_id)
+    if not run_dir:
+        raise RuntimeError(f"批次目录不存在: {run_id}")
+
+    reg_file = run_dir / "registered_accounts.txt"
+    if not reg_file.exists():
+        raise RuntimeError(f"账号文件不存在: {reg_file}")
+
+    original_text = reg_file.read_text(encoding="utf-8")
+    lines = original_text.splitlines()
+    target_index = -1
+
+    if isinstance(line_no, int) and 1 <= line_no <= len(lines):
+        probe_line = str(lines[line_no - 1] or "").strip()
+        probe_email = probe_line.split("----", 1)[0].strip() if probe_line else ""
+        if probe_email.lower() == email.strip().lower():
+            target_index = line_no - 1
+
+    if target_index < 0:
+        for idx, raw_line in enumerate(lines):
+            line = str(raw_line or "").strip()
+            if not line:
+                continue
+            line_email = line.split("----", 1)[0].strip()
+            if line_email.lower() == email.strip().lower():
+                target_index = idx
+                break
+
+    if target_index < 0:
+        raise RuntimeError(f"批次 {run_id} 中未找到账号: {email}")
+
+    parts = str(lines[target_index] or "").strip().split("----")
+    kept_parts = [
+        part for part in parts
+        if not (
+            part.startswith("access_token=")
+            or part.startswith("refresh_token=")
+            or part.startswith("id_token=")
+        )
+    ]
+    kept_parts.append(f"access_token={access_token}")
+    kept_parts.append(f"refresh_token={refresh_token}")
+    if id_token:
+        kept_parts.append(f"id_token={id_token}")
+
+    lines[target_index] = "----".join(kept_parts)
+    suffix = "\n" if original_text.endswith("\n") or lines else ""
+    reg_file.write_text("\n".join(lines) + suffix, encoding="utf-8")
+    return run_dir
+
+
+def _write_codex_token_cache(email: str, access_token: str, refresh_token: str, id_token: str) -> None:
+    payload = sub2api.decode_jwt_payload(access_token)
+    auth_info = payload.get("https://api.openai.com/auth", {}) or {}
+    profile = payload.get("https://api.openai.com/profile", {}) or {}
+    exp_timestamp = payload.get("exp")
+
+    expired = sub2api.iso_cn_from_ts(exp_timestamp) if isinstance(exp_timestamp, int) else ""
+    token_email = str(profile.get("email") or email or "").strip()
+    now_iso = datetime.now().astimezone().isoformat(timespec="seconds")
+
+    config = _load_config()
+    token_dir_name = str(config.get("token_json_dir", "codex_tokens"))
+    token_dir = Path(token_dir_name) if os.path.isabs(token_dir_name) else (BASE_DIR / token_dir_name)
+    token_dir.mkdir(parents=True, exist_ok=True)
+
+    token_data = {
+        "type": "codex",
+        "email": token_email,
+        "expired": expired,
+        "id_token": id_token,
+        "account_id": str(auth_info.get("chatgpt_account_id") or "").strip(),
+        "access_token": access_token,
+        "last_refresh": now_iso,
+        "refresh_token": refresh_token,
+    }
+    (token_dir / f"{token_email}.json").write_text(
+        json.dumps(token_data, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _update_helper_csv_tokens(run_dir: Path, email: str, access_token: str, refresh_token: str, id_token: str) -> None:
+    helper_csv = run_dir / SUB2API_OUTPUT_NAME
+    if not helper_csv.exists():
+        return
+
+    accounts = sub2api.collect_from_helper_csv(helper_csv)
+    updated = False
+    normalized_email = email.strip().lower()
+
+    for idx, account in enumerate(accounts, start=1):
+        if not isinstance(account, dict):
+            continue
+        credentials = account.get("credentials", {}) if isinstance(account.get("credentials"), dict) else {}
+        extra = account.get("extra", {}) if isinstance(account.get("extra"), dict) else {}
+        account_email = str(credentials.get("email") or extra.get("email") or "").strip().lower()
+        if account_email != normalized_email:
+            continue
+
+        refreshed = sub2api.build_account(
+            idx=idx,
+            access_token=access_token,
+            refresh_token=refresh_token,
+            id_token=id_token,
+            fallback_email=email,
+        )
+        for field in ("concurrency", "priority", "rate_multiplier", "auto_pause_on_expired"):
+            if field in account:
+                refreshed[field] = account[field]
+        accounts[idx - 1] = refreshed
+        updated = True
+        break
+
+    if updated:
+        sub2api.write_helper_csv(helper_csv, accounts)
 
 
 def _get_stats() -> dict:
@@ -1072,7 +1269,14 @@ app = FastAPI(title="ChatGPT 批量注册工具", lifespan=lifespan)
 
 @app.get("/api/config")
 async def get_config():
-    return _load_config()
+    config = _load_config()
+    resolved_profiles_json, resolved_profiles_source = _resolve_optional_file_text(
+        config.get("payment_profiles_json", ""),
+        base_dir=CONFIG_PATH.parent,
+    )
+    config["payment_profiles_json_resolved"] = resolved_profiles_json
+    config["payment_profiles_json_source"] = resolved_profiles_source
+    return config
 
 
 @app.put("/api/config")
@@ -1141,6 +1345,93 @@ async def list_accounts(run_id: Optional[str] = None):
     return _parse_accounts(run_id)
 
 
+@app.post("/api/accounts/refresh-tokens")
+def refresh_account_tokens(req: RefreshAccountTokensRequest):
+    items = req.accounts if isinstance(req.accounts, list) else []
+    if not items:
+        raise HTTPException(400, "没有可刷新的账号")
+
+    config = _load_config()
+    raw_proxy = req.proxy if req.proxy is not None else str(config.get("proxy", "") or "")
+    proxy, proxy_warning = _resolve_runtime_proxy(raw_proxy)
+    client = chatgpt_register.ChatGPTRegister(proxy=proxy or None, tag="token-refresh")
+
+    results: list[dict] = []
+    success_count = 0
+
+    for item in items:
+        email = str(item.email or "").strip()
+        run_id = str(item.run_id or "").strip()
+        refresh_token = str(item.refresh_token or "").strip()
+        line_no = item.line_no if isinstance(item.line_no, int) else None
+
+        if not email or not run_id or not refresh_token:
+            results.append({
+                "status": "error",
+                "email": email,
+                "run_id": run_id,
+                "line_no": line_no,
+                "message": "缺少 run_id / email / refresh_token",
+            })
+            continue
+
+        try:
+            refreshed = _refresh_codex_tokens(client, refresh_token)
+            access_token = str(refreshed.get("access_token") or "").strip()
+            new_refresh_token = str(refreshed.get("refresh_token") or "").strip() or refresh_token
+            id_token = str(refreshed.get("id_token") or "").strip()
+
+            run_dir = _update_registered_account_tokens(
+                run_id=run_id,
+                email=email,
+                access_token=access_token,
+                refresh_token=new_refresh_token,
+                id_token=id_token,
+                line_no=line_no,
+            )
+            _write_codex_token_cache(
+                email=email,
+                access_token=access_token,
+                refresh_token=new_refresh_token,
+                id_token=id_token,
+            )
+            _update_helper_csv_tokens(
+                run_dir=run_dir,
+                email=email,
+                access_token=access_token,
+                refresh_token=new_refresh_token,
+                id_token=id_token,
+            )
+
+            success_count += 1
+            results.append({
+                "status": "ok",
+                "email": email,
+                "run_id": run_id,
+                "line_no": line_no,
+                "access_token": access_token,
+                "refresh_token": new_refresh_token,
+                "id_token": id_token,
+                "expires_at": sub2api.iso_cn_from_ts(sub2api.decode_jwt_payload(access_token).get("exp")),
+            })
+        except Exception as e:
+            results.append({
+                "status": "error",
+                "email": email,
+                "run_id": run_id,
+                "line_no": line_no,
+                "message": str(e),
+            })
+
+    return {
+        "status": "ok" if success_count else "error",
+        "success_count": success_count,
+        "fail_count": len(results) - success_count,
+        "proxy_warning": proxy_warning,
+        "items": results,
+    }
+
+
 @app.post("/api/mailbox/code")
 def query_mailbox_code(req: MailboxCodeQueryRequest):
     return _query_mailbox_code(req.mail_token, req.timeout)
@@ -1148,13 +1439,17 @@ def query_mailbox_code(req: MailboxCodeQueryRequest):
 
 @app.get("/api/accounts/{run_id}/download/{file_type}")
 async def download_file(run_id: str, file_type: str):
-    allowed = {"ak": "ak.txt", "rk": "rk.txt", "sub2api": "sub2api_accounts.json", "accounts": "registered_accounts.txt"}
+    allowed = {"ak": "ak.txt", "rk": "rk.txt", "sub2api": SUB2API_OUTPUT_NAME, "accounts": "registered_accounts.txt"}
     if file_type not in allowed:
         raise HTTPException(400, f"不支持的文件类型: {file_type}")
     fp = BASE_DIR / RESULTS_DIR_NAME / run_id / allowed[file_type]
+    if file_type == "sub2api" and not fp.exists():
+        legacy_fp = BASE_DIR / RESULTS_DIR_NAME / run_id / LEGACY_SUB2API_OUTPUT_NAME
+        if legacy_fp.exists():
+            fp = legacy_fp
     if not fp.exists():
         raise HTTPException(404, "文件不存在")
-    return FileResponse(fp, filename=allowed[file_type])
+    return FileResponse(fp, filename=fp.name)
 
 
 # --- Stats ---
@@ -1188,15 +1483,8 @@ async def convert_to_sub2api(req: ConvertRequest):
         acc["rate_multiplier"] = req.rate_multiplier
         acc["auto_pause_on_expired"] = req.auto_pause_on_expired
 
-    from datetime import timezone as tz
-    output = {
-        "exported_at": datetime.now(tz.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
-        "proxies": [],
-        "accounts": accounts,
-    }
-
     output_path = work_dir / req.output_filename
-    output_path.write_text(json.dumps(output, ensure_ascii=False, indent=2), encoding="utf-8")
+    sub2api.write_helper_csv(output_path, accounts)
 
     return {
         "status": "ok",

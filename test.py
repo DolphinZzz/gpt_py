@@ -13,7 +13,7 @@ import time
 import uuid
 import webbrowser
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 from urllib.parse import parse_qs, urlencode
 
 import requests
@@ -114,59 +114,16 @@ def _open_url_visible_default(
     target = str(url or "").strip()
     if not target:
         return {"ok": False, "error": "empty url"}
-
-    launch_kwargs: dict[str, Any] = {"headless": False}
-    if sys.platform.startswith("linux"):
-        launch_kwargs["args"] = _linux_launch_args()
-    if os.name == "nt":
-        launch_kwargs["channel"] = "chrome"
-
-    try:
-        with sync_playwright() as p:
-            try:
-                browser = p.chromium.launch(**launch_kwargs)
-            except Exception:
-                fallback: dict[str, Any] = {"headless": False}
-                if sys.platform.startswith("linux"):
-                    fallback["args"] = _linux_launch_args()
-                browser = p.chromium.launch(**fallback)
-            context = browser.new_context()
-            page = context.new_page()
-            page.on("requestfailed", lambda req: print(f"[pw][requestfailed] {req.method} {req.url} -> {req.failure}"))
-            page.on("console", lambda msg: print(f"[pw][console][{msg.type}] {msg.text}"))
-            page.on("pageerror", lambda err: print(f"[pw][pageerror] {err}"))
-            page.on("popup", lambda pop: print(f"[pw][popup] {pop.url}"))
-
-            resp = page.goto(target, wait_until="domcontentloaded", timeout=90000)
-            try:
-                page.wait_for_load_state("networkidle", timeout=30000)
-            except Exception:
-                pass
-            page.wait_for_timeout(max(0, int(wait_ms)))
-            shot = str(Path(screenshot_file).resolve())
-            try:
-                page.screenshot(path=shot, full_page=True)
-            except Exception:
-                shot = ""
-            result = {
-                "ok": True,
-                "method": "playwright_headed_default",
-                "status": (resp.status if resp else None),
-                "final_url": page.url,
-                "title": page.title(),
-                "screenshot": shot,
-            }
-            if keep_open:
-                print("[action] 浏览器已打开，按回车后关闭浏览器并继续...")
-                try:
-                    input()
-                except Exception:
-                    pass
-            context.close()
-            browser.close()
-            return result
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
+    # 历史接口保留，但 test 流程已统一改为系统默认浏览器，避免额外再拉起 Playwright Chrome。
+    result = _open_url_in_system_browser(target)
+    if result.get("ok"):
+        result.setdefault("status", None)
+        result.setdefault("final_url", target)
+        result.setdefault("title", "")
+        result.setdefault("screenshot", "")
+        if keep_open:
+            print("[action] 支付页已在系统默认浏览器中打开，请在该页面继续操作")
+    return result
 
 
 def _open_url_in_system_browser(url: str) -> dict:
@@ -577,8 +534,25 @@ def _normalize_payment_profile(item: dict) -> dict[str, str]:
     }
 
 
+def _resolve_payment_profiles_json_text(raw_value: str) -> str:
+    text = str(raw_value or "").strip()
+    if not text:
+        return ""
+
+    candidate = Path(text).expanduser()
+    if not candidate.is_absolute():
+        candidate = (Path(__file__).with_name("config.json").parent / candidate).resolve()
+
+    if candidate.exists() and candidate.is_file():
+        try:
+            return candidate.read_text(encoding="utf-8")
+        except Exception:
+            return text
+    return text
+
+
 def _load_payment_profiles_from_config(cfg: dict) -> list[dict[str, str]]:
-    raw = str(cfg.get("payment_profiles_json") or "").strip()
+    raw = _resolve_payment_profiles_json_text(str(cfg.get("payment_profiles_json") or ""))
     if not raw:
         return []
     try:
@@ -917,201 +891,34 @@ def _auto_capture_stripe_from_checkout(
     fallback_open_url: str = "",
     log_tag: str = "",
 ) -> dict:
-    launch_kwargs = {"headless": False, "args": _linux_launch_args()}
-    pw_proxy = _normalize_playwright_proxy(proxy)
-    if pw_proxy:
-        launch_kwargs["proxy"] = {"server": pw_proxy}
-
-    latest: dict[str, dict] = {}
-    captures: list[dict] = []
-    browser = None
-    context = None
     data_url = (
         f"https://chatgpt.com/checkout/openai_llc/{checkout_session_id}.data"
         "?_routes=routes%2Fcheckout.%24entity.%24checkoutId"
     )
     target = f"https://chatgpt.com/checkout/openai_llc/{checkout_session_id}"
     manual_open_url = str(fallback_open_url or target).strip()
-
-    try:
-        with sync_playwright() as p:
-            _emit_project_log("info", log_tag, f"[subscription] 正在自动打开浏览器: {manual_open_url}")
-            browser = p.chromium.launch(**launch_kwargs)
-            if storage_state_file.exists():
-                context = browser.new_context(
-                    locale="zh-CN",
-                    timezone_id="Asia/Shanghai",
-                    storage_state=str(storage_state_file),
-                )
-                print(f"[info] loaded browser storage state <- {storage_state_file}")
-            else:
-                context = browser.new_context(locale="zh-CN", timezone_id="Asia/Shanghai")
-
-            if cookies and not storage_state_file.exists():
-                context.add_cookies(cast(list[Any], cookies))
-                try:
-                    context.storage_state(path=str(storage_state_file))
-                    print(f"[ok] bootstrapped browser storage state -> {storage_state_file}")
-                except Exception as e:
-                    print(f"[warn] bootstrap storage state save failed: {e}")
-
-            page = context.new_page()
-
-            def on_response(resp):
-                try:
-                    req = resp.request
-                    key = _match_key(req.url)
-                    if key not in {"stripe_init", "stripe_payment_methods", "stripe_confirm", "checkout_data"}:
-                        return
-
-                    req_headers = req.headers
-                    req_ct = (req_headers.get("content-type") or "").lower()
-                    req_body_raw = req.post_data or ""
-
-                    if "application/json" in req_ct:
-                        req_body = _safe_json_loads(req_body_raw)
-                    elif "application/x-www-form-urlencoded" in req_ct:
-                        req_body = _parse_form_data(req_body_raw)
-                    else:
-                        req_body = req_body_raw
-
-                    item = {
-                        "ts": int(time.time()),
-                        "kind": key,
-                        "method": req.method,
-                        "url": req.url,
-                        "request_headers": req_headers,
-                        "request_body_raw": req_body_raw,
-                        "request_body": req_body,
-                        "response_status": resp.status,
-                        "response_headers": dict(resp.headers),
-                        "response_body": (resp.text() or "")[:40000],
-                    }
-                    captures.append(item)
-                    latest[key] = item
-                    print(f"[captured-auto] {key} {req.method} -> {resp.status}")
-                except Exception as e:
-                    print(f"[warn] auto-capture failed: {e}")
-
-            page.on("response", on_response)
-
-            print(f"[info] opening data route first: {data_url}")
-            try:
-                page.goto(data_url, wait_until="domcontentloaded", timeout=90000)
-                page.wait_for_timeout(1200)
-            except Exception as e:
-                print(f"[warn] open data route failed: {e}")
-
-            page.goto(target, wait_until="domcontentloaded", timeout=90000)
-            page.wait_for_timeout(2000)
-
-            if "auth.openai.com" in page.url or "/auth/" in page.url:
-                print("[warn] browser not logged in; please complete login manually in opened browser")
-                login_deadline = time.time() + 300
-                while time.time() < login_deadline:
-                    if "chatgpt.com" in page.url and "auth.openai.com" not in page.url and "/auth/" not in page.url:
-                        break
-                    page.wait_for_timeout(1000)
-                if not ("chatgpt.com" in page.url and "auth.openai.com" not in page.url and "/auth/" not in page.url):
-                    return {
-                        "ok": False,
-                        "error": "manual login timeout in browser",
-                        "latest": latest,
-                        "captures": captures,
-                        "final_url": page.url,
-                    }
-                print("[ok] browser manual login detected")
-                try:
-                    context.storage_state(path=str(storage_state_file))
-                    print(f"[ok] saved browser storage state -> {storage_state_file}")
-                except Exception as e:
-                    print(f"[warn] save browser storage state failed: {e}")
-
-                try:
-                    page.goto(data_url, wait_until="domcontentloaded", timeout=90000)
-                    page.wait_for_timeout(1200)
-                except Exception as e:
-                    print(f"[warn] reopen data route failed: {e}")
-
-                page.goto(target, wait_until="domcontentloaded", timeout=90000)
-                page.wait_for_timeout(2000)
-
-            print("[action] 浏览器已打开，请在页面中手动输入卡号/CVC并点击支付")
-            print("[action] 脚本会自动抓取 payment_methods/confirm 真实参数")
-
-            deadline = time.time() + max_wait_ms / 1000
-            last_log = 0.0
-            while True:
-                while time.time() < deadline:
-                    if _confirm_response_paid(latest.get("stripe_confirm")):
-                        print("[ok] detected paid state in stripe_confirm")
-                        break
-                    now = time.time()
-                    if now - last_log >= 5:
-                        paid = _confirm_response_paid(latest.get("stripe_confirm"))
-                        print(f"[wait] captured={sorted(list(latest.keys()))} paid={paid}")
-                        last_log = now
-                    page.wait_for_timeout(1000)
-
-                if _confirm_response_paid(latest.get("stripe_confirm")):
-                    break
-
-                print("[warn] wait timeout reached, payment not paid yet")
-                return {
-                    "ok": True,
-                    "target": target,
-                    "latest": latest,
-                    "captures": captures,
-                    "final_url": page.url,
-                    "final_paid": False,
-                    "timed_out": True,
-                }
-
-            return {
-                "ok": True,
-                "target": target,
-                "latest": latest,
-                "captures": captures,
-                "final_url": page.url,
-                "final_paid": _confirm_response_paid(latest.get("stripe_confirm")),
-            }
-    except Exception as e:
-        fallback_open_result = _open_url_in_system_browser(manual_open_url) if manual_open_url else {"ok": False, "error": "empty url"}
-        if fallback_open_result.get("ok"):
-            fallback_msg = (
-                f"[subscription] Playwright 自动打开失败，已回退系统浏览器: {manual_open_url}\n"
-                "请直接在打开的页面完成支付"
-            )
-            _emit_project_log("warning", log_tag, fallback_msg)
-            return {
-                "ok": True,
-                "target": target,
-                "latest": latest,
-                "captures": captures,
-                "final_paid": False,
-                "fallback_opened": True,
-                "fallback_open_url": manual_open_url,
-                "fallback_open_result": fallback_open_result,
-                "error": str(e),
-            }
-        return {"ok": False, "error": str(e), "latest": latest, "captures": captures}
-    finally:
-        try:
-            if context:
-                context.storage_state(path=str(storage_state_file))
-                print(f"[ok] saved browser storage state -> {storage_state_file}")
-        except Exception as e:
-            print(f"[warn] final storage state save failed: {e}")
-        try:
-            if context:
-                context.close()
-        except Exception:
-            pass
-        try:
-            if browser:
-                browser.close()
-        except Exception:
-            pass
+    _emit_project_log("info", log_tag, f"[subscription] 正在打开系统默认浏览器: {manual_open_url}")
+    print(f"[info] checkout data url: {data_url}")
+    open_result = _open_url_in_system_browser(manual_open_url) if manual_open_url else {"ok": False, "error": "empty url"}
+    if open_result.get("ok"):
+        print("[action] 已使用系统默认浏览器打开支付页，请在该页面手动输入卡号/CVC并完成支付")
+        print("[info] 已移除 Playwright Chrome 自动抓取，当前流程只保留默认浏览器")
+        return {
+            "ok": True,
+            "target": target,
+            "latest": {},
+            "captures": [],
+            "final_url": manual_open_url,
+            "final_paid": False,
+            "manual_browser_opened": True,
+            "fallback_opened": True,
+            "fallback_open_url": manual_open_url,
+            "fallback_open_result": open_result,
+            "reason": "runtime capture disabled; opened system browser only",
+        }
+    error = str(open_result.get("error") or "cannot open system browser")
+    _emit_project_log("error", log_tag, f"[subscription] 打开系统默认浏览器失败: {error}")
+    return {"ok": False, "error": error, "latest": {}, "captures": [], "target": target}
 
 
 def _first_val(x) -> str:
@@ -1341,23 +1148,29 @@ def _run_protocol_only(
                         f"[subscription] 待人工付款: {email}\n"
                         f"ChatGPT 支付页: {checkout_url}\n"
                         f"Stripe 直达: {stripe_hosted_url}\n"
-                        f"说明: 浏览器将自动打开支付页；如未自动打开，请点击上方链接继续"
+                        f"说明: 程序会用系统默认浏览器打开支付页；如未自动打开，请点击上方链接继续"
                     )
                     if payment_profile_block:
                         manual_msg = f"{manual_msg}\n{payment_profile_block}"
                     _emit_project_log("warning", log_tag, manual_msg)
+                stripe_open_attempted = False
+                stripe_open_res = {"ok": False, "reason": "not attempted"}
                 if not open_stripe_hosted_url:
                     print("[info] skip opening stripe hosted url (open_stripe_hosted_url=false)")
+                elif not skip_runtime_capture:
+                    print("[info] runtime capture 流程会自行打开系统默认浏览器，跳过预打开 stripe hosted url")
                 elif (stripe_open_mode or "").strip().lower() == "system":
+                    stripe_open_attempted = True
                     stripe_open_res = _open_url_in_system_browser(stripe_hosted_url)
                 else:
+                    stripe_open_attempted = True
                     stripe_open_res = _open_url_visible_default(
                         stripe_hosted_url,
                         wait_ms=25000,
                         screenshot_file="stripe_headed_kr.png",
                         keep_open=True,
                     )
-                if open_stripe_hosted_url:
+                if stripe_open_attempted:
                     if stripe_open_res.get("ok"):
                         print(
                             f"[ok] opened stripe hosted url "
@@ -1370,7 +1183,7 @@ def _run_protocol_only(
             print(f"[error] protocol stripe_init failed: {e}")
 
         if not skip_runtime_capture:
-            print("[info] 接下来会打开真实浏览器，请手动输入卡号/CVC并点击支付")
+            print("[info] 接下来会用系统默认浏览器打开支付页，请手动输入卡号/CVC并点击支付")
             runtime_capture = _auto_capture_stripe_from_checkout(
                 proxy=proxy,
                 cookies=_extract_curl_cookies(reg.session),
@@ -1931,8 +1744,8 @@ def main():
     parser.add_argument(
         "--stripe-open-mode",
         choices=["playwright", "system"],
-        default="playwright",
-        help="How to open stripe hosted url: playwright or system browser",
+        default="system",
+        help="Deprecated compatibility flag. test flow now always uses the system default browser.",
     )
     parser.add_argument(
         "--no-browser-capture",

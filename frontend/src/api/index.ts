@@ -1,6 +1,14 @@
 import axios from 'axios'
 import { useEffect, useRef, useCallback, useState } from 'react'
-import type { Config, LogEntry, ConvertRequest, ConvertResult, ConvertibleRun, MailboxCodeResult } from '../types'
+import type {
+  Config,
+  LogEntry,
+  ConvertRequest,
+  ConvertResult,
+  ConvertibleRun,
+  MailboxCodeResult,
+  RefreshAccountTokensResult,
+} from '../types'
 
 const api = axios.create({ baseURL: '/api' })
 
@@ -19,6 +27,11 @@ export const getTaskStatus = () => api.get('/tasks/status')
 export const getTaskHistory = () => api.get('/tasks/history')
 export const getAccounts = (runId?: string) =>
   api.get('/accounts', { params: runId ? { run_id: runId } : {} })
+export const refreshAccountTokens = (data: {
+  accounts: Array<{ run_id: string; email: string; refresh_token: string; line_no?: number }>
+  proxy?: string
+}) =>
+  api.post<RefreshAccountTokensResult>('/accounts/refresh-tokens', data)
 export const queryMailboxCode = (data: { mail_token: string; timeout?: number }) =>
   api.post<MailboxCodeResult>('/mailbox/code', data)
 export const getStats = () => api.get('/stats')

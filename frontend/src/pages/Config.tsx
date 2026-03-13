@@ -164,11 +164,11 @@ export default function Config() {
           <Form.Item
             label="账号付款映射(JSON)"
             name="payment_profiles_json"
-            tooltip="按账号精确匹配付款资料；敏感复制页和付款日志都会优先取这里的资料，未命中时才回退到上面的默认资料"
+            tooltip="支持直接粘贴 JSON，或填写一个 .json 文件路径。相对路径会按 gpt_py/config.json 所在目录解析。"
           >
             <Input.TextArea
               rows={8}
-              placeholder={'例如:\n[\n  {\n    "account": "foo@example.com",\n    "cardholder_name": "DUCK MAIL LTD",\n    "card_number": "4242424242424242",\n    "exp_month": "12",\n    "exp_year": "2029",\n    "payment_card_cvc": "123",\n    "note": "KR billing"\n  }\n]'}
+              placeholder={'可直接填:\npayment.json\n\n或者填内联 JSON:\n[\n  {\n    "account": "foo@example.com",\n    "cardholder_name": "DUCK MAIL LTD",\n    "card_number": "4242424242424242",\n    "exp_month": "12",\n    "exp_year": "2029",\n    "payment_card_cvc": "123",\n    "note": "KR billing"\n  }\n]'}
             />
           </Form.Item>
         </Card>

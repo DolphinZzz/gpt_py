@@ -21,13 +21,20 @@ import secrets
 import hashlib
 import base64
 import hmac
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from urllib.parse import urlparse, parse_qs, urlencode
 
 from curl_cffi import requests as curl_requests
 from curl_cffi.requests import BrowserType
-from sub2api_utils import build_account as build_sub2api_account, decode_jwt_payload
+from sub2api_utils import (
+    build_account as build_sub2api_account,
+    collect_from_helper_csv,
+    collect_from_sub2api_json,
+    decode_jwt_payload,
+    write_helper_csv,
+)
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 MAILBOX_QUERY_TOKEN_SECRET_FILE = os.path.join(SCRIPT_DIR, ".mailbox_query_token_secret")
@@ -721,19 +728,15 @@ def _update_sub2api_json(access_token: str, refresh_token: str, id_token: str, e
     if RUN_OUTPUT_DIR is None:
         _prepare_run_output_paths()
 
-    output_path = os.path.join(_ensure_run_output_dir(), "sub2api_accounts.json")
+    output_path = os.path.join(_ensure_run_output_dir(), "sub2api_accounts.csv")
+    legacy_output_path = os.path.join(_ensure_run_output_dir(), "sub2api_accounts.json")
 
     with _file_lock:
         if os.path.exists(output_path):
-            try:
-                output = json.loads(open(output_path, "r", encoding="utf-8").read())
-            except Exception:
-                output = {}
+            accounts = collect_from_helper_csv(Path(output_path))
+        elif os.path.exists(legacy_output_path):
+            accounts = collect_from_sub2api_json(Path(legacy_output_path))
         else:
-            output = {}
-
-        accounts = output.get("accounts")
-        if not isinstance(accounts, list):
             accounts = []
 
         exists = any(
@@ -751,15 +754,7 @@ def _update_sub2api_json(access_token: str, refresh_token: str, id_token: str, e
             )
             accounts.append(account)
 
-        from datetime import datetime, timezone
-
-        output = {
-            "exported_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
-            "proxies": [],
-            "accounts": accounts,
-        }
-        with open(output_path, "w", encoding="utf-8") as f:
-            json.dump(output, f, ensure_ascii=False, indent=2)
+        write_helper_csv(Path(output_path), accounts)
 
 
 def _ensure_run_output_dir():

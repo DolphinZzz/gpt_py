@@ -1,41 +1,125 @@
 import { useEffect, useState } from 'react'
 import type { ChangeEvent } from 'react'
 import { Alert, Button, Card, Input, Select, Space, Table, Tag, Typography, message } from 'antd'
-import { getAccounts, getTaskHistory, queryMailboxCode } from '../api'
-import type { Account, HistoryRun, MailboxCodeResult } from '../types'
+import { getAccounts, getTaskHistory, queryMailboxCode, refreshAccountTokens } from '../api'
+import type { Account, HistoryRun, MailboxCodeResult, RefreshAccountTokenItem } from '../types'
 
 const { Text } = Typography
+const ALL_RUNS_VALUE = '__all__'
 
 export default function Accounts() {
   const [accounts, setAccounts] = useState<Account[]>([])
   const [runs, setRuns] = useState<HistoryRun[]>([])
-  const [selectedRun, setSelectedRun] = useState<string | undefined>()
+  const [selectedRun, setSelectedRun] = useState<string>(ALL_RUNS_VALUE)
   const [search, setSearch] = useState('')
   const [mailTokenInput, setMailTokenInput] = useState('')
   const [mailQueryResult, setMailQueryResult] = useState<MailboxCodeResult | null>(null)
   const [queryingMailCode, setQueryingMailCode] = useState(false)
+  const [refreshingAllTokens, setRefreshingAllTokens] = useState(false)
+  const [refreshingRowKeys, setRefreshingRowKeys] = useState<Record<string, boolean>>({})
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
     getTaskHistory().then(r => {
       setRuns(r.data)
-      if (r.data.length > 0) {
-        setSelectedRun(r.data[0].run_id)
-      }
     })
   }, [])
 
   useEffect(() => {
-    if (!selectedRun) { setLoading(false); return }
     setLoading(true)
-    getAccounts(selectedRun)
+    getAccounts(selectedRun === ALL_RUNS_VALUE ? undefined : selectedRun)
       .then(r => setAccounts(r.data))
       .finally(() => setLoading(false))
   }, [selectedRun])
 
+  const getAccountKey = (account: Pick<Account, 'email' | 'run_id' | 'line_no'>) =>
+    `${account.run_id || 'all'}:${account.line_no ?? 'na'}:${account.email}`
+
   const filtered = search
-    ? accounts.filter(a => a.email.toLowerCase().includes(search.toLowerCase()))
+    ? accounts.filter(a => {
+      const keyword = search.toLowerCase()
+      return [a.email, a.run_id, a.run_timestamp].some(v => String(v || '').toLowerCase().includes(keyword))
+    })
     : accounts
+
+  const applyRefreshResults = (items: RefreshAccountTokenItem[]) => {
+    const nextByKey = new Map(
+      items
+        .filter(item => item.status === 'ok')
+        .map(item => [`${item.run_id}:${item.line_no ?? 'na'}:${item.email}`, item]),
+    )
+    if (!nextByKey.size) {
+      return
+    }
+
+    setAccounts(prev => prev.map(account => {
+      const matched = nextByKey.get(getAccountKey(account))
+      if (!matched) {
+        return account
+      }
+      return {
+        ...account,
+        access_token: matched.access_token || account.access_token,
+        refresh_token: matched.refresh_token || account.refresh_token,
+        id_token: matched.id_token || account.id_token,
+      }
+    }))
+  }
+
+  const handleRefreshTokens = async (targetAccounts: Account[], rowKey?: string) => {
+    const refreshable = targetAccounts
+      .filter(account => account.run_id && account.email && account.refresh_token)
+      .map(account => ({
+        run_id: String(account.run_id),
+        email: account.email,
+        refresh_token: String(account.refresh_token),
+        line_no: account.line_no,
+      }))
+
+    if (!refreshable.length) {
+      message.warning('当前没有可更新 Token 的账号')
+      return
+    }
+
+    if (rowKey) {
+      setRefreshingRowKeys(prev => ({ ...prev, [rowKey]: true }))
+    } else {
+      setRefreshingAllTokens(true)
+    }
+
+    try {
+      const { data } = await refreshAccountTokens({ accounts: refreshable })
+      applyRefreshResults(data.items || [])
+
+      if (data.proxy_warning) {
+        message.warning(data.proxy_warning)
+      }
+
+      if (data.fail_count > 0) {
+        const failedEmails = (data.items || [])
+          .filter(item => item.status === 'error')
+          .map(item => item.email)
+          .slice(0, 3)
+          .join('，')
+        message.warning(`已更新 ${data.success_count} 个账号，失败 ${data.fail_count} 个${failedEmails ? `：${failedEmails}` : ''}`)
+      } else {
+        message.success(`已更新 ${data.success_count} 个账号的 Token`)
+      }
+    } catch (e: any) {
+      const detail = e.response?.data?.detail || '更新 Token 失败'
+      message.error(detail)
+    } finally {
+      if (rowKey) {
+        setRefreshingRowKeys(prev => {
+          const next = { ...prev }
+          delete next[rowKey]
+          return next
+        })
+      } else {
+        setRefreshingAllTokens(false)
+      }
+    }
+  }
 
   const handleMailCodeQuery = async (rawToken?: string) => {
     const token = String(rawToken ?? mailTokenInput).trim()
@@ -75,6 +159,18 @@ export default function Accounts() {
   }
 
   const columns = [
+    {
+      title: '批次',
+      dataIndex: 'run_id',
+      key: 'run_id',
+      width: 220,
+      render: (_: string, record: Account) => (
+        <Space direction="vertical" size={4}>
+          <Tag color="blue">{record.run_id || '未归档'}</Tag>
+          {record.run_timestamp ? <Text type="secondary">{record.run_timestamp}</Text> : null}
+        </Space>
+      ),
+    },
     {
       title: '邮箱',
       dataIndex: 'email',
@@ -126,20 +222,52 @@ export default function Accounts() {
       ellipsis: true,
       render: (v?: string) => v ? <Text copyable={{ text: v }} ellipsis style={{ maxWidth: 200 }}>{v.slice(0, 30)}...</Text> : '-',
     },
+    {
+      title: '操作',
+      key: 'actions',
+      width: 120,
+      fixed: 'right' as const,
+      render: (_: unknown, record: Account) => {
+        const rowKey = getAccountKey(record)
+        return (
+          <Button
+            size="small"
+            type="primary"
+            ghost
+            loading={!!refreshingRowKeys[rowKey]}
+            disabled={!record.refresh_token || refreshingAllTokens}
+            onClick={() => void handleRefreshTokens([record], rowKey)}
+          >
+            更新 Token
+          </Button>
+        )
+      },
+    },
   ]
 
   return (
     <Card title="账号列表" extra={
-      <div style={{ display: 'flex', gap: 8 }}>
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
         <Select
           value={selectedRun}
           onChange={setSelectedRun}
           style={{ width: 200 }}
           placeholder="选择批次"
-          options={runs.map(r => ({ value: r.run_id, label: `${r.timestamp} (${r.total_accounts})` }))}
+          options={[
+            { value: ALL_RUNS_VALUE, label: '全部批次' },
+            ...runs.map(r => ({ value: r.run_id, label: `${r.timestamp} (${r.total_accounts})` })),
+          ]}
         />
+        <Button
+          type="primary"
+          loading={refreshingAllTokens}
+          disabled={!filtered.some(account => account.run_id && account.refresh_token)}
+          onClick={() => void handleRefreshTokens(filtered)}
+        >
+          一键更新当前列表 Token
+        </Button>
         <Input.Search
-          placeholder="搜索邮箱"
+          placeholder="搜索邮箱 / 批次"
           value={search}
           onChange={(e: ChangeEvent<HTMLInputElement>) => setSearch(e.target.value)}
           style={{ width: 200 }}
@@ -190,11 +318,11 @@ export default function Accounts() {
       <Table
         dataSource={filtered}
         columns={columns}
-        rowKey="email"
+        rowKey={getAccountKey}
         loading={loading}
         pagination={{ pageSize: 20 }}
         size="middle"
-        scroll={{ x: 1200 }}
+        scroll={{ x: 1500 }}
       />
     </Card>
   )

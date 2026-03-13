@@ -13,10 +13,12 @@ type PaymentProfile = {
   cardNumber: string
   expMonth: string
   expYear: string
-  expiry: string
   cvc: string
   masked: string
   note: string
+  addressLine: string
+  postalCode: string
+  city: string
 }
 
 async function copyToClipboard(text: string) {
@@ -38,14 +40,29 @@ async function copyToClipboard(text: string) {
   }
 }
 
-function buildExpiry(month: string, year: string, fallback: string) {
-  const mm = String(month || '').trim()
-  const yy = String(year || '').trim()
-  if (mm && yy) {
-    const shortYear = yy.length >= 2 ? yy.slice(-2) : yy
-    return `${mm.padStart(2, '0')}/${shortYear}`
+function normalizeMonth(value: unknown) {
+  const text = String(value || '').trim()
+  if (!text) return ''
+  return text.padStart(2, '0')
+}
+
+function normalizeYear(value: unknown) {
+  const text = String(value || '').trim()
+  if (!text) return ''
+  if (text.length <= 2) return text
+  return text.slice(-2)
+}
+
+function splitExpiry(value: unknown) {
+  const text = String(value || '').trim()
+  if (!text) {
+    return { month: '', year: '' }
   }
-  return String(fallback || '').trim()
+  const [month = '', year = ''] = text.split(/[/-]/, 2)
+  return {
+    month: normalizeMonth(month),
+    year: normalizeYear(year),
+  }
 }
 
 function maskNumber(number: string, fallback: string) {
@@ -58,12 +75,12 @@ function maskNumber(number: string, fallback: string) {
 
 function normalizeProfile(raw: Record<string, unknown>): PaymentProfile {
   const cardNumber = String(raw.payment_card_number || raw.card_number || '').trim()
-  const expMonth = String(raw.payment_card_exp_month || raw.exp_month || '').trim()
-  const expYear = String(raw.payment_card_exp_year || raw.exp_year || '').trim()
-  const expiry = buildExpiry(
-    expMonth,
-    expYear,
-    String(raw.payment_card_expiry || raw.expiry || '').trim(),
+  const fallbackExpiry = splitExpiry(raw.payment_card_expiry || raw.expiry)
+  const expMonth = normalizeMonth(
+    raw.payment_card_exp_month || raw.exp_month || raw.expiration_month || raw.month || fallbackExpiry.month,
+  )
+  const expYear = normalizeYear(
+    raw.payment_card_exp_year || raw.exp_year || raw.expiration_year || raw.year || fallbackExpiry.year,
   )
 
   return {
@@ -72,10 +89,12 @@ function normalizeProfile(raw: Record<string, unknown>): PaymentProfile {
     cardNumber,
     expMonth,
     expYear,
-    expiry,
-    cvc: String(raw.payment_card_cvc || raw.cvc || '').trim(),
+    cvc: String(raw.payment_card_cvc || raw.cvc || raw.cvv || '').trim(),
     masked: maskNumber(cardNumber, String(raw.payment_card_number_masked || raw.card_number_masked || '').trim()),
     note: String(raw.payment_card_note || raw.note || raw['备注'] || '').trim(),
+    addressLine: String(raw.billing_line1 || raw.line1 || raw.address_line1 || '').trim(),
+    postalCode: String(raw.billing_postal || raw.postal_code || raw.zip || raw.zip_code || '').trim(),
+    city: String(raw.billing_city || raw.city || '').trim(),
   }
 }
 
@@ -86,9 +105,11 @@ function hasSensitiveData(profile: PaymentProfile | null) {
     profile.cardNumber ||
     profile.expMonth ||
     profile.expYear ||
-    profile.expiry ||
     profile.cvc ||
-    profile.note,
+    profile.note ||
+    profile.addressLine ||
+    profile.postalCode ||
+    profile.city,
   )
 }
 
@@ -105,6 +126,15 @@ function parseProfiles(raw: string) {
   } catch {
     return [] as PaymentProfile[]
   }
+}
+
+function pickRandomProfile(profiles: PaymentProfile[], currentAccount: string) {
+  if (!profiles.length) return null
+  if (profiles.length === 1) return profiles[0]
+
+  const candidates = profiles.filter((item) => item.account !== currentAccount)
+  const pool = candidates.length > 0 ? candidates : profiles
+  return pool[Math.floor(Math.random() * pool.length)]
 }
 
 function CopyRow({
@@ -155,14 +185,23 @@ export default function SensitiveCopy() {
   const [loading, setLoading] = useState(true)
   const [accountInput, setAccountInput] = useState('')
 
-  const fetchConfig = () => {
+  const fetchConfig = (pickRandom = false) => {
     setLoading(true)
     getConfig()
       .then((r) => {
         setConfig(r.data)
-        const profiles = parseProfiles(String(r.data?.payment_profiles_json || ''))
-        if (!accountInput && profiles.length === 1) {
-          setAccountInput(profiles[0].account)
+        const nextProfiles = parseProfiles(
+          String(r.data?.payment_profiles_json_resolved || r.data?.payment_profiles_json || ''),
+        )
+        if (pickRandom && nextProfiles.length > 0) {
+          const nextProfile = pickRandomProfile(nextProfiles, accountInput.trim().toLowerCase())
+          if (nextProfile) {
+            setAccountInput(nextProfile.account)
+          }
+          return
+        }
+        if (!accountInput && nextProfiles.length === 1) {
+          setAccountInput(nextProfiles[0].account)
         }
       })
       .finally(() => setLoading(false))
@@ -172,7 +211,9 @@ export default function SensitiveCopy() {
     fetchConfig()
   }, [])
 
-  const profiles = parseProfiles(String(config?.payment_profiles_json || ''))
+  const profiles = parseProfiles(
+    String(config?.payment_profiles_json_resolved || config?.payment_profiles_json || ''),
+  )
   const defaultProfile = config ? normalizeProfile(config as unknown as Record<string, unknown>) : null
   const normalizedAccount = accountInput.trim().toLowerCase()
   const matchedProfile = normalizedAccount
@@ -184,10 +225,14 @@ export default function SensitiveCopy() {
   const showNoMatch = Boolean(normalizedAccount) && !matchedProfile
 
   const combinedBlock = profile ? [
-    profile.cardholder ? `持卡人: ${profile.cardholder}` : '',
+    profile.cardholder ? `姓名: ${profile.cardholder}` : '',
     profile.cardNumber ? `卡号: ${profile.cardNumber}` : '',
-    profile.expiry ? `有效期: ${profile.expiry}` : '',
+    profile.expMonth ? `到期月: ${profile.expMonth}` : '',
+    profile.expYear ? `到期年: ${profile.expYear}` : '',
     profile.cvc ? `CVV: ${profile.cvc}` : '',
+    profile.addressLine ? `地址: ${profile.addressLine}` : '',
+    profile.postalCode ? `邮编: ${profile.postalCode}` : '',
+    profile.city ? `城市: ${profile.city}` : '',
     profile.note ? `备注: ${profile.note}` : '',
   ].filter(Boolean).join('\n') : ''
 
@@ -209,14 +254,18 @@ export default function SensitiveCopy() {
       <Card
         loading={loading}
         title="敏感信息复制"
-        extra={<Button icon={<ReloadOutlined />} onClick={fetchConfig}>刷新</Button>}
+        extra={<Button icon={<ReloadOutlined />} onClick={() => fetchConfig(true)}>随机展示</Button>}
       >
         <Space direction="vertical" size={12} style={{ width: '100%' }}>
           <Alert
             type="warning"
             showIcon
             message="此页按账号显示对应的付款资料"
-            description="优先匹配“账号付款映射(JSON)”里的账号；如果未配置映射，则回退到默认付款资料。敏感字段不会进入运行日志。"
+            description={
+              config?.payment_profiles_json_source
+                ? `当前已从 ${config.payment_profiles_json_source} 读取账号付款映射；未命中时会回退到默认付款资料。敏感字段不会进入运行日志。`
+                : '优先匹配“账号付款映射(JSON)”里的账号；如果未配置映射，则回退到默认付款资料。敏感字段不会进入运行日志。'
+            }
           />
           <Input
             value={accountInput}
@@ -286,12 +335,8 @@ export default function SensitiveCopy() {
                   </Col>
                 </Row>
                 <div>
-                  <Text type="secondary">有效期</Text>
-                  <CopyRow label="有效期" value={profile.expiry} />
-                </div>
-                <div>
                   <Text type="secondary">CVV</Text>
-                  <CopyRow label="CVV" value={profile.cvc} secret />
+                  <CopyRow label="CVV" value={profile.cvc} />
                 </div>
                 <div>
                   <Text type="secondary">备注</Text>
@@ -309,11 +354,6 @@ export default function SensitiveCopy() {
                     <Text type="secondary">日志展示卡号</Text>
                     <br />
                     <Text copyable={profile.masked ? { text: profile.masked } : undefined}>{profile.masked || '-'}</Text>
-                  </Paragraph>
-                  <Paragraph style={{ marginBottom: 0 }}>
-                    <Text type="secondary">日志展示有效期</Text>
-                    <br />
-                    <Text copyable={profile.expiry ? { text: profile.expiry } : undefined}>{profile.expiry || '-'}</Text>
                   </Paragraph>
                 </Space>
               </Card>

@@ -22,7 +22,7 @@
   "docker_worker_service": "worker",
   "docker_warp_service": "warp",
   "sub2api_auto_upload": true,
-  "sub2api_upload_url": "https://www.codex.hair/api/v1/admin/accounts/data",
+  "sub2api_upload_url": "https://team.bcol.cc/api/v1/admin/accounts/data",
   "sub2api_upload_bearer": "",
   "sub2api_upload_cookie": "",
   "sub2api_upload_user_agent": "",
@@ -38,5 +38,5 @@
   "payment_card_exp_month": "",
   "payment_card_exp_year": "",
   "payment_card_cvc": "",
-  "payment_profiles_json": ""
+  "payment_profiles_json": "payment.json"
 }

@@ -5,7 +5,7 @@ import { convertToSub2Api, getConvertibleRuns, uploadBackfillAccounts } from '..
 import type { ConvertRequest, ConvertResult, ConvertibleRun } from '../types'
 
 const sourceLabels: Record<string, string> = {
-  sub2api_json: 'Sub2API JSON',
+  sub2api_json: 'CSV / 旧 JSON',
   codex_tokens: 'Codex Tokens',
   results_file: '注册结果文件',
   ak_rk: 'AK/RK',
@@ -70,8 +70,8 @@ export default function Convert() {
   }
 
   return (
-    <Card title="Sub2API 格式转换" extra={
-      <span style={{ color: '#888', fontSize: 12 }}>将已注册的 Token 转换为 Sub2API 兼容格式</span>
+    <Card title="Helper CSV 导出" extra={
+      <span style={{ color: '#888', fontSize: 12 }}>将已注册的 Token 转换为可直接导入 helper 的 CSV</span>
     }>
       <Form
         form={form}
@@ -83,7 +83,7 @@ export default function Convert() {
           priority: 1,
           rate_multiplier: 1,
           auto_pause_on_expired: true,
-          output_filename: 'sub2api_accounts.json',
+          output_filename: 'sub2api_accounts.csv',
         }}
         style={{ maxWidth: 700 }}
       >
@@ -99,7 +99,7 @@ export default function Convert() {
           type="info"
           showIcon
           style={{ marginBottom: 16 }}
-          message="转换会优先直接复用批次里的 sub2api_accounts.json；如果不存在，再自动回退到 tokens、注册结果文件和 AK/RK。"
+          message="转换会优先直接复用批次里的 sub2api_accounts.csv；如果不存在，会兼容旧 sub2api_accounts.json，再回退到 tokens、注册结果文件和 AK/RK。"
         />
 
         <Space size="large" wrap>
@@ -119,7 +119,7 @@ export default function Convert() {
         </Form.Item>
 
         <Form.Item label="输出文件名" name="output_filename">
-          <Input placeholder="sub2api_accounts.json" />
+          <Input placeholder="sub2api_accounts.csv" />
         </Form.Item>
 
         <Form.Item>

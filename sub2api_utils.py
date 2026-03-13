@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import csv
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -8,6 +9,15 @@ from typing import Any, Dict, List, Optional
 
 
 TZ_CN = timezone(timedelta(hours=8))
+HELPER_CSV_HEADERS = [
+    "email",
+    "token",
+    "refresh_token",
+    "id_token",
+    "chatgpt_account_id",
+    "oai_device_id",
+    "expire_at",
+]
 
 
 def decode_jwt_payload(token: str) -> Dict[str, Any]:
@@ -51,6 +61,46 @@ def iso_cn_from_ts(ts: Optional[int]) -> str:
     if not isinstance(ts, int) or ts <= 0:
         return ""
     return datetime.fromtimestamp(ts, tz=TZ_CN).isoformat(timespec="seconds")
+
+
+def helper_expire_at_from_ts(ts: Optional[int]) -> str:
+    if not isinstance(ts, int) or ts <= 0:
+        return ""
+    return datetime.fromtimestamp(ts, tz=TZ_CN).strftime("%Y/%m/%d %H:%M:%S")
+
+
+def parse_helper_expire_at(value: str) -> Optional[datetime]:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+
+    patterns = (
+        "%Y/%m/%d %H:%M:%S",
+        "%Y/%m/%d %H:%M",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+    )
+    for pattern in patterns:
+        try:
+            parsed = datetime.strptime(raw, pattern)
+            return parsed.replace(tzinfo=TZ_CN)
+        except ValueError:
+            continue
+    return None
+
+
+def helper_expire_at_to_iso(value: str) -> str:
+    parsed = parse_helper_expire_at(value)
+    if not parsed:
+        return ""
+    return parsed.isoformat(timespec="seconds")
+
+
+def expires_in_from_dt(value: Optional[datetime]) -> int:
+    if value is None:
+        return 0
+    remain = int(value.astimezone(timezone.utc).timestamp() - datetime.now(timezone.utc).timestamp())
+    return remain if remain > 0 else 0
 
 
 def expires_in_from_ts(ts: Optional[int]) -> int:
@@ -103,12 +153,141 @@ def build_account(
     }
 
 
+def build_helper_csv_row(
+    idx: int,
+    access_token: str,
+    refresh_token: str,
+    id_token: str,
+    fallback_email: str,
+) -> Dict[str, str]:
+    account = build_account(
+        idx=idx,
+        access_token=access_token,
+        refresh_token=refresh_token,
+        id_token=id_token,
+        fallback_email=fallback_email,
+    )
+    credentials = account.get("credentials", {}) if isinstance(account, dict) else {}
+    if not isinstance(credentials, dict):
+        credentials = {}
+
+    payload = decode_jwt_payload(access_token)
+    auth = payload.get("https://api.openai.com/auth", {}) or {}
+    exp_ts = payload.get("exp")
+
+    return {
+        "email": str(credentials.get("email") or fallback_email or "").strip(),
+        "token": access_token,
+        "refresh_token": refresh_token,
+        "id_token": id_token,
+        "chatgpt_account_id": str(credentials.get("chatgpt_account_id") or auth.get("chatgpt_account_id") or "").strip(),
+        "oai_device_id": "",
+        "expire_at": helper_expire_at_from_ts(exp_ts),
+    }
+
+
+def account_to_helper_csv_row(account: Dict[str, Any]) -> Dict[str, str]:
+    credentials = account.get("credentials", {}) if isinstance(account, dict) else {}
+    extra = account.get("extra", {}) if isinstance(account, dict) else {}
+    if not isinstance(credentials, dict):
+        credentials = {}
+    if not isinstance(extra, dict):
+        extra = {}
+
+    token = str(credentials.get("access_token") or "").strip()
+    refresh_token = str(credentials.get("refresh_token") or "").strip()
+    id_token = str(credentials.get("id_token") or "").strip()
+    email = str(credentials.get("email") or extra.get("email") or "").strip()
+    chatgpt_account_id = str(credentials.get("chatgpt_account_id") or "").strip()
+    expire_at_iso = str(credentials.get("expires_at") or "").strip()
+    expire_at = ""
+
+    if expire_at_iso:
+        try:
+            expire_at = datetime.fromisoformat(expire_at_iso).astimezone(TZ_CN).strftime("%Y/%m/%d %H:%M:%S")
+        except Exception:
+            parsed = parse_helper_expire_at(expire_at_iso)
+            expire_at = parsed.strftime("%Y/%m/%d %H:%M:%S") if parsed else ""
+
+    if not expire_at and token:
+        exp_ts = decode_jwt_payload(token).get("exp")
+        expire_at = helper_expire_at_from_ts(exp_ts)
+
+    return {
+        "email": email,
+        "token": token,
+        "refresh_token": refresh_token,
+        "id_token": id_token,
+        "chatgpt_account_id": chatgpt_account_id,
+        "oai_device_id": "",
+        "expire_at": expire_at,
+    }
+
+
+def write_helper_csv(path: Path, accounts: List[Dict[str, Any]]) -> None:
+    rows = [account_to_helper_csv_row(account) for account in accounts if isinstance(account, dict)]
+    with path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=HELPER_CSV_HEADERS)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({key: str(row.get(key, "") or "") for key in HELPER_CSV_HEADERS})
+
+
 def collect_from_sub2api_json(path: Path) -> List[Dict[str, Any]]:
     data = load_json(path)
     accounts = data.get("accounts") if isinstance(data, dict) else []
     if not isinstance(accounts, list):
         return []
     return [item for item in accounts if isinstance(item, dict)]
+
+
+def collect_from_helper_csv(path: Path) -> List[Dict[str, Any]]:
+    if not path.exists():
+        return []
+
+    accounts: List[Dict[str, Any]] = []
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        for idx, row in enumerate(reader, start=1):
+            if not isinstance(row, dict):
+                continue
+
+            access_token = str(row.get("token") or row.get("access_token") or "").strip()
+            refresh_token = str(row.get("refresh_token") or "").strip()
+            id_token = str(row.get("id_token") or "").strip()
+            email = str(row.get("email") or "").strip()
+            chatgpt_account_id = str(row.get("chatgpt_account_id") or row.get("account_id") or "").strip()
+            expire_at = str(row.get("expire_at") or row.get("expires_at") or "").strip()
+
+            if not access_token or not refresh_token:
+                continue
+
+            account = build_account(
+                idx=idx,
+                access_token=access_token,
+                refresh_token=refresh_token,
+                id_token=id_token,
+                fallback_email=email,
+            )
+            credentials = account.get("credentials", {})
+            if not isinstance(credentials, dict):
+                continue
+
+            if chatgpt_account_id:
+                credentials["chatgpt_account_id"] = chatgpt_account_id
+
+            expire_dt = parse_helper_expire_at(expire_at)
+            if expire_dt:
+                credentials["expires_at"] = expire_dt.isoformat(timespec="seconds")
+                credentials["expires_in"] = expires_in_from_dt(expire_dt)
+
+            if email:
+                credentials["email"] = email
+                account.setdefault("extra", {})["email"] = email
+
+            accounts.append(account)
+
+    return accounts
 
 
 def collect_from_codex_tokens(tokens_dir: Path) -> List[Dict[str, Any]]:

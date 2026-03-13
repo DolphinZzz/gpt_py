@@ -19,6 +19,43 @@ function escapeCsvCell(value: unknown) {
   return text
 }
 
+async function copyText(value: string, label: string) {
+  const text = String(value || '').trim()
+  if (!text) {
+    message.warning(`${label} 不存在`)
+    return false
+  }
+
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text)
+      message.success(`${label} 已复制`)
+      return true
+    }
+  } catch {
+    // Ignore and fallback below.
+  }
+
+  const textarea = document.createElement('textarea')
+  textarea.value = text
+  textarea.setAttribute('readonly', 'true')
+  textarea.style.position = 'fixed'
+  textarea.style.opacity = '0'
+  document.body.appendChild(textarea)
+  textarea.select()
+
+  try {
+    document.execCommand('copy')
+    message.success(`${label} 已复制`)
+    return true
+  } catch {
+    message.error(`${label} 复制失败`)
+    return false
+  } finally {
+    document.body.removeChild(textarea)
+  }
+}
+
 export default function Accounts() {
   const [accounts, setAccounts] = useState<Account[]>([])
   const [runs, setRuns] = useState<HistoryRun[]>([])
@@ -170,6 +207,10 @@ export default function Accounts() {
     if (autoQuery) {
       void handleMailCodeQuery(token)
     }
+  }
+
+  const handleCopySecret = async (value: string | undefined, label: string) => {
+    await copyText(String(value || ''), label)
   }
 
   const handleExportCsv = () => {
@@ -384,10 +425,12 @@ export default function Accounts() {
       title: 'Mail Token',
       dataIndex: 'mail_token',
       key: 'mail_token',
-      width: 260,
+      width: 170,
       render: (v?: string) => v ? (
         <Space direction="vertical" size={4}>
-          <Text copyable={{ text: v }} ellipsis style={{ maxWidth: 220, display: 'inline-block' }}>{v}</Text>
+          <Button size="small" onClick={() => void handleCopySecret(v, 'Mail Token')}>
+            复制 Mail Token
+          </Button>
           <Space size={4}>
             <Button size="small" onClick={() => applyMailToken(v)}>带入</Button>
             <Button size="small" type="primary" ghost onClick={() => void handleMailCodeQuery(v)}>查码</Button>
@@ -399,15 +442,23 @@ export default function Accounts() {
       title: 'Access Token',
       dataIndex: 'access_token',
       key: 'access_token',
-      ellipsis: true,
-      render: (v?: string) => v ? <Text copyable={{ text: v }} ellipsis style={{ maxWidth: 200 }}>{v.slice(0, 30)}...</Text> : '-',
+      width: 130,
+      render: (v?: string) => v ? (
+        <Button size="small" onClick={() => void handleCopySecret(v, 'Access Token')}>
+          复制 Access
+        </Button>
+      ) : '-',
     },
     {
       title: 'Refresh Token',
       dataIndex: 'refresh_token',
       key: 'refresh_token',
-      ellipsis: true,
-      render: (v?: string) => v ? <Text copyable={{ text: v }} ellipsis style={{ maxWidth: 200 }}>{v.slice(0, 30)}...</Text> : '-',
+      width: 130,
+      render: (v?: string) => v ? (
+        <Button size="small" onClick={() => void handleCopySecret(v, 'Refresh Token')}>
+          复制 Refresh
+        </Button>
+      ) : '-',
     },
     {
       title: '操作',

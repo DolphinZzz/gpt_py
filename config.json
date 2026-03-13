@@ -3,7 +3,7 @@
   "resend_api_base": "https://api.resend.com",
   "resend_api_key": "re_pyQPaAcY_Lkn4waUMLr977UdpJSdbKZMD",
   "resend_domain": "ilkoxpra.resend.app",
-  "proxy": "http://192.168.10.104:6152",
+  "proxy": "",
   "output_file": "registered_accounts.txt",
   "enable_oauth": true,
   "oauth_required": true,

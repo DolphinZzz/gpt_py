@@ -1,11 +1,23 @@
 import { useEffect, useState } from 'react'
 import type { ChangeEvent } from 'react'
+import { DownloadOutlined } from '@ant-design/icons'
 import { Alert, Button, Card, Input, Select, Space, Table, Tag, Typography, message } from 'antd'
 import { getAccounts, getTaskHistory, queryMailboxCode, refreshAccountTokens } from '../api'
 import type { Account, HistoryRun, MailboxCodeResult, RefreshAccountTokenItem } from '../types'
 
 const { Text } = Typography
 const ALL_RUNS_VALUE = '__all__'
+
+function escapeCsvCell(value: unknown) {
+  const text = String(value ?? '').replace(/\r?\n/g, ' ').trim()
+  if (!text) {
+    return ''
+  }
+  if (/[",]/.test(text)) {
+    return `"${text.replace(/"/g, '""')}"`
+  }
+  return text
+}
 
 export default function Accounts() {
   const [accounts, setAccounts] = useState<Account[]>([])
@@ -158,6 +170,55 @@ export default function Accounts() {
     }
   }
 
+  const handleExportCsv = () => {
+    if (!filtered.length) {
+      message.warning('当前没有可导出的账号')
+      return
+    }
+
+    const headers = [
+      'run_id',
+      'run_timestamp',
+      'line_no',
+      'email',
+      'password',
+      'email_password',
+      'oauth_status',
+      'mail_token',
+      'access_token',
+      'refresh_token',
+      'id_token',
+    ]
+
+    const rows = filtered.map(account => ([
+      account.run_id,
+      account.run_timestamp,
+      account.line_no,
+      account.email,
+      account.password,
+      account.email_password,
+      account.oauth_status,
+      account.mail_token,
+      account.access_token,
+      account.refresh_token,
+      account.id_token,
+    ].map(escapeCsvCell).join(',')))
+
+    const csvContent = `\uFEFF${headers.join(',')}\n${rows.join('\n')}`
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' })
+    const url = window.URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    const runPart = selectedRun === ALL_RUNS_VALUE ? 'all-runs' : selectedRun
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+    link.href = url
+    link.download = `accounts-${runPart}-${stamp}.csv`
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    window.URL.revokeObjectURL(url)
+    message.success(`已导出 ${filtered.length} 条账号记录`)
+  }
+
   const columns = [
     {
       title: '批次',
@@ -265,6 +326,9 @@ export default function Accounts() {
           onClick={() => void handleRefreshTokens(filtered)}
         >
           一键更新当前列表 Token
+        </Button>
+        <Button icon={<DownloadOutlined />} onClick={handleExportCsv} disabled={!filtered.length}>
+          导出当前列表 CSV
         </Button>
         <Input.Search
           placeholder="搜索邮箱 / 批次"

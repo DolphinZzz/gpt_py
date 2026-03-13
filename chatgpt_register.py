@@ -10,11 +10,9 @@ import os
 import re
 import uuid
 import json
-import importlib.util
 import random
 import string
 import time
-import sys
 import threading
 import traceback
 import secrets
@@ -256,8 +254,6 @@ _file_lock = threading.Lock()
 _mail_capability_lock = threading.Lock()
 _resend_receiving_access_ok = False
 _resend_receiving_access_error = ""
-_test_module_cache = None
-_test_module_lock = threading.Lock()
 
 # 日志回调钩子 (供 FastAPI 层捕获日志)
 _log_callback = None  # callable(level: str, tag: str, message: str) -> None
@@ -266,56 +262,6 @@ _log_callback = None  # callable(level: str, tag: str, message: str) -> None
 def set_log_callback(callback):
     global _log_callback
     _log_callback = callback
-
-
-def _load_test_module():
-    global _test_module_cache
-    if _test_module_cache is not None:
-        return _test_module_cache
-
-    with _test_module_lock:
-        if _test_module_cache is not None:
-            return _test_module_cache
-
-        module_path = os.path.join(SCRIPT_DIR, "test.py")
-        spec = importlib.util.spec_from_file_location("gpt_py_test_module", module_path)
-        if spec is None or spec.loader is None:
-            raise RuntimeError(f"无法加载 test.py: {module_path}")
-
-        module = importlib.util.module_from_spec(spec)
-        sys.modules["gpt_py_test_module"] = module
-        spec.loader.exec_module(module)
-        _test_module_cache = module
-        return module
-
-
-def _run_post_registration_flow(
-    *,
-    reg,
-    email: str,
-    password: str,
-    proxy,
-    mail_token,
-    output_file: str,
-    tag: str,
-    tokens,
-) -> dict:
-    module = _load_test_module()
-    runner = getattr(module, "run_registered_account_flow", None)
-    if not callable(runner):
-        raise RuntimeError("test.py 未提供 run_registered_account_flow")
-
-    output_dir = RUN_OUTPUT_DIR or os.path.dirname(os.path.abspath(output_file))
-    return runner(
-        email=email,
-        password=password,
-        proxy=proxy,
-        mail_token=mail_token,
-        output_dir=output_dir,
-        tag=tag,
-        existing_reg=reg,
-        existing_tokens=tokens if isinstance(tokens, dict) else None,
-    )
 
 
 def _ensure_resend_receiving_access(session_factory, impersonate: str = None):
@@ -2259,32 +2205,6 @@ def _register_one(idx, total, proxy, output_file):
                 _log_callback("success", tag or str(idx), f"[register] 注册成功: {email}")
             except Exception:
                 pass
-
-        try:
-            post_result = _run_post_registration_flow(
-                reg=reg,
-                email=email,
-                password=chatgpt_password,
-                proxy=proxy,
-                mail_token=mail_token,
-                output_file=output_file,
-                tag=tag or str(idx),
-                tokens=tokens if isinstance(tokens, dict) else None,
-            )
-            if not bool((post_result or {}).get("ok")):
-                post_status = str((post_result or {}).get("status") or "").strip().lower()
-                if post_status == "pending":
-                    reg._print("[post] 订阅待人工付款，注册结果已保留")
-                else:
-                    reg._print("[post] 订阅失败，注册结果已保留")
-        except Exception as post_exc:
-            post_msg = f"test.py 自动链路异常: {post_exc}"
-            reg._print(f"[post] {post_msg}")
-            if _log_callback:
-                try:
-                    _log_callback("error", tag or str(idx), post_msg)
-                except Exception:
-                    pass
 
         return True, email, None
 

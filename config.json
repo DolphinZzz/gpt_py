@@ -29,5 +29,14 @@
   "sub2api_upload_proxy": "",
   "sub2api_skip_default_group_bind": true,
   "sub2api_auto_group_bind": true,
-  "sub2api_group_id": 2
+  "sub2api_group_id": 2,
+  "payment_cardholder_name": "",
+  "payment_card_number_masked": "",
+  "payment_card_expiry": "",
+  "payment_card_note": "",
+  "payment_card_number": "",
+  "payment_card_exp_month": "",
+  "payment_card_exp_year": "",
+  "payment_card_cvc": "",
+  "payment_profiles_json": ""
 }

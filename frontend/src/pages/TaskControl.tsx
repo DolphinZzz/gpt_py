@@ -73,7 +73,12 @@ export default function TaskControl() {
   const running = s?.status === 'running'
   const stopping = s?.status === 'stopping'
   const total = s?.total_target || 0
-  const done = (s?.success_count || 0) + (s?.fail_count || 0)
+  const registerSuccess = s?.register_success_count ?? s?.success_count ?? 0
+  const registerFail = s?.register_fail_count ?? s?.fail_count ?? 0
+  const subscriptionSuccess = s?.subscription_success_count ?? 0
+  const subscriptionFail = s?.subscription_fail_count ?? 0
+  const subscriptionPending = s?.subscription_pending_count ?? 0
+  const done = registerSuccess + registerFail
   const shownDone = total > 0 ? Math.min(done, total) : done
   const percent = total > 0 ? Math.round(shownDone / total * 100) : 0
   const info = statusMap[s?.status || 'idle'] || statusMap.idle
@@ -165,12 +170,21 @@ export default function TaskControl() {
             {s?.elapsed_seconds != null ? `${s.elapsed_seconds}s` : '-'}
           </Descriptions.Item>
           <Descriptions.Item label="目标数量">{total}</Descriptions.Item>
-          <Descriptions.Item label="已完成">{shownDone} / {total}</Descriptions.Item>
-          <Descriptions.Item label="成功">
-            <span style={{ color: '#3f8600', fontWeight: 600 }}>{s?.success_count || 0}</span>
+          <Descriptions.Item label="注册进度">{shownDone} / {total}</Descriptions.Item>
+          <Descriptions.Item label="注册成功">
+            <span style={{ color: '#3f8600', fontWeight: 600 }}>{registerSuccess}</span>
           </Descriptions.Item>
-          <Descriptions.Item label="失败">
-            <span style={{ color: '#cf1322', fontWeight: 600 }}>{s?.fail_count || 0}</span>
+          <Descriptions.Item label="注册失败">
+            <span style={{ color: '#cf1322', fontWeight: 600 }}>{registerFail}</span>
+          </Descriptions.Item>
+          <Descriptions.Item label="订阅成功">
+            <span style={{ color: '#3f8600', fontWeight: 600 }}>{subscriptionSuccess}</span>
+          </Descriptions.Item>
+          <Descriptions.Item label="待付款">
+            <span style={{ color: '#d48806', fontWeight: 600 }}>{subscriptionPending}</span>
+          </Descriptions.Item>
+          <Descriptions.Item label="订阅失败">
+            <span style={{ color: '#cf1322', fontWeight: 600 }}>{subscriptionFail}</span>
           </Descriptions.Item>
           {isContainerMode && (
             <Descriptions.Item label="容器运行数">

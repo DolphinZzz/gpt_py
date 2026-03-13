@@ -105,6 +105,15 @@ class ConfigModel(BaseModel):
     sub2api_skip_default_group_bind: bool = True
     sub2api_auto_group_bind: bool = True
     sub2api_group_id: int = 2
+    payment_cardholder_name: str = ""
+    payment_card_number_masked: str = ""
+    payment_card_expiry: str = ""
+    payment_card_note: str = ""
+    payment_card_number: str = ""
+    payment_card_exp_month: str = ""
+    payment_card_exp_year: str = ""
+    payment_card_cvc: str = ""
+    payment_profiles_json: str = ""
 
 
 class StartTaskRequest(BaseModel):
@@ -153,9 +162,56 @@ class TaskManager:
         self._project_dir: Optional[str] = None
         self._worker_service: Optional[str] = None
         self._warp_service: Optional[str] = None
+        self.register_success_count = 0
+        self.register_fail_count = 0
+        self.subscription_success_count = 0
+        self.subscription_fail_count = 0
+        self.subscription_pending_count = 0
+        self._register_states: dict[str, str] = {}
+        self._subscription_states: dict[str, str] = {}
 
     def set_loop(self, loop: asyncio.AbstractEventLoop):
         self._loop = loop
+
+    def _refresh_account_counts(self):
+        self.register_success_count = sum(1 for state in self._register_states.values() if state == "success")
+        self.register_fail_count = sum(1 for state in self._register_states.values() if state == "fail")
+        self.subscription_success_count = sum(1 for state in self._subscription_states.values() if state == "success")
+        self.subscription_fail_count = sum(1 for state in self._subscription_states.values() if state == "fail")
+        self.subscription_pending_count = sum(1 for state in self._subscription_states.values() if state == "pending")
+        self.success_count = self.register_success_count
+        self.fail_count = self.register_fail_count
+
+    def _update_account_state_from_log(self, tag: str, message: str):
+        tag_text = str(tag or "").strip()
+        msg = str(message or "").strip()
+        if not tag_text or tag_text == "system" or not msg:
+            return
+
+        changed = False
+        if msg.startswith("[register] 注册成功"):
+            if self._register_states.get(tag_text) != "success":
+                self._register_states[tag_text] = "success"
+                changed = True
+        elif msg.startswith("[register] 注册失败"):
+            if self._register_states.get(tag_text) != "fail":
+                self._register_states[tag_text] = "fail"
+                changed = True
+        elif msg.startswith("[subscription] 订阅成功"):
+            if self._subscription_states.get(tag_text) != "success":
+                self._subscription_states[tag_text] = "success"
+                changed = True
+        elif msg.startswith("[subscription] 订阅失败"):
+            if self._subscription_states.get(tag_text) != "fail":
+                self._subscription_states[tag_text] = "fail"
+                changed = True
+        elif msg.startswith("[subscription] 待人工付款"):
+            if self._subscription_states.get(tag_text) not in {"success", "fail", "pending"}:
+                self._subscription_states[tag_text] = "pending"
+                changed = True
+
+        if changed:
+            self._refresh_account_counts()
 
     def emit_log(self, level: str, tag: str, message: str):
         entry = {
@@ -165,13 +221,8 @@ class TaskManager:
             "message": message,
         }
         self.log_buffer.append(entry)
-
-        if level == "success":
-            with self._lock:
-                self.success_count += 1
-        elif level == "error" and "注册失败" in message:
-            with self._lock:
-                self.fail_count += 1
+        with self._lock:
+            self._update_account_state_from_log(tag, message)
 
         if self._loop:
             for q in list(self.log_subscribers):
@@ -324,6 +375,13 @@ class TaskManager:
         self.start_time = time.time()
         self.success_count = 0
         self.fail_count = 0
+        self.register_success_count = 0
+        self.register_fail_count = 0
+        self.subscription_success_count = 0
+        self.subscription_fail_count = 0
+        self.subscription_pending_count = 0
+        self._register_states.clear()
+        self._subscription_states.clear()
         self.total_target = total_accounts
         self.container_target = max(1, int(container_count or 1))
         self.container_running = 0
@@ -383,8 +441,14 @@ class TaskManager:
                 elif not use_containers and self.status != "stopped":
                     self._auto_convert_and_upload()
                     self.status = "finished"
+                    snapshot = self.get_status()
                     self.emit_log("info", "system",
-                                  f"任务完成: 成功 {self.success_count}, 失败 {self.fail_count}")
+                                  "任务完成: "
+                                  f"注册成功 {snapshot['register_success_count']}, "
+                                  f"注册失败 {snapshot['register_fail_count']}, "
+                                  f"订阅成功 {snapshot['subscription_success_count']}, "
+                                  f"待付款 {snapshot['subscription_pending_count']}, "
+                                  f"订阅失败 {snapshot['subscription_fail_count']}")
 
         self._thread = threading.Thread(target=_run, daemon=True)
         self._thread.start()
@@ -402,6 +466,8 @@ class TaskManager:
 
         success_count = self.success_count
         fail_count = self.fail_count
+        register_success_count = self.register_success_count
+        register_fail_count = self.register_fail_count
         total_target = self.total_target
 
         if self.mode == "containers":
@@ -410,6 +476,8 @@ class TaskManager:
             if scanned_total >= 0:
                 success_count = scanned_success
                 fail_count = max(0, scanned_total - scanned_success)
+                register_success_count = success_count
+                register_fail_count = fail_count
 
         return {
             "status": self.status,
@@ -418,6 +486,11 @@ class TaskManager:
             "start_time": datetime.fromtimestamp(self.start_time).strftime("%Y-%m-%d %H:%M:%S") if self.start_time else None,
             "success_count": success_count,
             "fail_count": fail_count,
+            "register_success_count": register_success_count,
+            "register_fail_count": register_fail_count,
+            "subscription_success_count": self.subscription_success_count,
+            "subscription_fail_count": self.subscription_fail_count,
+            "subscription_pending_count": self.subscription_pending_count,
             "total_target": total_target,
             "container_target": self.container_target,
             "container_running": self.container_running,

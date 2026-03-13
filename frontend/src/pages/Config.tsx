@@ -104,6 +104,75 @@ export default function Config() {
           </Form.Item>
         </Card>
 
+        <Card type="inner" title="付款资料" style={{ marginBottom: 16 }}>
+          <Form.Item
+            label="持卡人"
+            name="payment_cardholder_name"
+            tooltip="用于日志提示和敏感复制页"
+          >
+            <Input placeholder="例如: DUCK MAIL LTD" />
+          </Form.Item>
+          <Form.Item
+            label="完整卡号"
+            name="payment_card_number"
+            tooltip="仅用于敏感复制页，不会进入日志"
+          >
+            <Input.Password placeholder="例如: 4242424242424242" />
+          </Form.Item>
+          <Form.Item
+            label="到期月"
+            name="payment_card_exp_month"
+            tooltip="仅用于敏感复制页；日志可自动用月/年生成有效期"
+          >
+            <Input placeholder="例如: 12" />
+          </Form.Item>
+          <Form.Item
+            label="到期年"
+            name="payment_card_exp_year"
+            tooltip="仅用于敏感复制页；支持 2029 或 29"
+          >
+            <Input placeholder="例如: 2029" />
+          </Form.Item>
+          <Form.Item
+            label="CVV"
+            name="payment_card_cvc"
+            tooltip="仅用于敏感复制页，不会进入日志"
+          >
+            <Input.Password placeholder="例如: 123" />
+          </Form.Item>
+          <Form.Item
+            label="卡号(仅掩码/尾号)"
+            name="payment_card_number_masked"
+            tooltip="用于日志展示；留空时会自动从完整卡号推导掩码"
+          >
+            <Input placeholder="例如: **** **** **** 4242" />
+          </Form.Item>
+          <Form.Item
+            label="有效期"
+            name="payment_card_expiry"
+            tooltip="用于日志展示；留空时会自动从月/年推导"
+          >
+            <Input placeholder="例如: 12/29" />
+          </Form.Item>
+          <Form.Item
+            label="付款备注"
+            name="payment_card_note"
+            tooltip="可选，例如账单地址要求、发卡行提示等"
+          >
+            <Input.TextArea rows={3} placeholder="例如: 韩国账单地址，手机号可留空" />
+          </Form.Item>
+          <Form.Item
+            label="账号付款映射(JSON)"
+            name="payment_profiles_json"
+            tooltip="按账号精确匹配付款资料；敏感复制页和付款日志都会优先取这里的资料，未命中时才回退到上面的默认资料"
+          >
+            <Input.TextArea
+              rows={8}
+              placeholder={'例如:\n[\n  {\n    "account": "foo@example.com",\n    "cardholder_name": "DUCK MAIL LTD",\n    "card_number": "4242424242424242",\n    "exp_month": "12",\n    "exp_year": "2029",\n    "payment_card_cvc": "123",\n    "note": "KR billing"\n  }\n]'}
+            />
+          </Form.Item>
+        </Card>
+
         <Card type="inner" title="输出配置">
           <Form.Item label="输出文件" name="output_file">
             <Input />

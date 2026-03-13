@@ -74,6 +74,7 @@ export default function Logs() {
               { value: 'all', label: '全部' },
               { value: 'info', label: '信息' },
               { value: 'success', label: '成功' },
+              { value: 'warning', label: '待处理' },
               { value: 'error', label: '错误' },
             ]}
           />

@@ -9,6 +9,7 @@ import {
   HistoryOutlined,
   TeamOutlined,
   SwapOutlined,
+  LockOutlined,
 } from '@ant-design/icons'
 
 import Dashboard from './pages/Dashboard'
@@ -18,6 +19,7 @@ import Logs from './pages/Logs'
 import History from './pages/History'
 import Accounts from './pages/Accounts'
 import Convert from './pages/Convert'
+import SensitiveCopy from './pages/SensitiveCopy'
 
 const { Sider, Content, Header } = Layout
 const { Title } = Typography
@@ -27,6 +29,7 @@ const menuItems = [
   { key: 'task', icon: <PlayCircleOutlined />, label: '任务控制' },
   { key: 'logs', icon: <FileTextOutlined />, label: '实时日志' },
   { key: 'config', icon: <SettingOutlined />, label: '参数配置' },
+  { key: 'sensitive-copy', icon: <LockOutlined />, label: '敏感复制' },
   { key: 'convert', icon: <SwapOutlined />, label: 'Sub2API 转换' },
   { key: 'history', icon: <HistoryOutlined />, label: '历史记录' },
   { key: 'accounts', icon: <TeamOutlined />, label: '账号列表' },
@@ -37,6 +40,7 @@ const pages: Record<string, React.ReactNode> = {
   task: <TaskControl />,
   logs: <Logs />,
   config: <Config />,
+  'sensitive-copy': <SensitiveCopy />,
   convert: <Convert />,
   history: <History />,
   accounts: <Accounts />,

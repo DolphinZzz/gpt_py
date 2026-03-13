@@ -8,6 +8,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 import uuid
 import webbrowser
@@ -50,10 +51,12 @@ DEFAULT_CHECKOUT_PAYLOAD = {
 }
 
 # Startup hardcoded defaults (as requested)
-HARDCODED_EMAIL = "wsty1rok71g@duckmail.sbs"
-HARDCODED_PASSWORD = "waFs8Ln6mV$BF$"
-HARDCODED_MAIL_PASSWORD = "xPsA3*Fnt7o&5N"
-HARDCODED_PROXY = "socks5h://127.0.0.1:7897"
+HARDCODED_EMAIL = "3j2w3mjysfi0@ilkoxpra.resend.app"
+HARDCODED_PASSWORD = "WT8aVRwaY@7&L&"
+HARDCODED_MAIL_PASSWORD = "mbx_eyJjcmVhdGVkX2F0IjoxNzczMzMzMDI2Ljk3MywiZW1haWwiOiIzajJ3M21qeXNmaTBAaWxrb3hwcmEucmVzZW5kLmFwcCIsIm5vbmNlIjoiam9Zb0dzTHE0R00iLCJ2IjoxfQ.MAqicB08p3C6SZdWA_a1_NLeaBAS2AjlhPbZq3VvkGU"
+HARDCODED_PROXY = "socks5h://127.0.0.1:6152"
+
+_manual_checkout_lock = threading.Lock()
 
 
 def _match_key(url: str) -> str | None:
@@ -87,6 +90,11 @@ def _emit_project_log(level: str, tag: str, message: str):
             callback(level, tag, message)
         except Exception:
             pass
+
+
+def _print_and_log(level: str, tag: str, message: str):
+    print(message)
+    _emit_project_log(level, tag, message)
 
 
 def _safe_output_stem(value: str, default: str = "account") -> str:
@@ -166,7 +174,23 @@ def _open_url_in_system_browser(url: str) -> dict:
     if not target:
         return {"ok": False, "error": "empty url"}
 
+    platform_openers: list[list[str]] = []
+    if sys.platform == "darwin":
+        platform_openers.append(["open", target])
+    elif os.name == "nt":
+        platform_openers.append(["cmd", "/c", "start", "", target])
+    else:
+        platform_openers.append(["xdg-open", target])
+
+    for opener in platform_openers:
+        try:
+            subprocess.Popen(opener, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return {"ok": True, "method": "platform_default", "cmd": opener}
+        except Exception:
+            continue
+
     candidates = [
+        os.environ.get("BROWSER", "").strip(),
         os.environ.get("CHROME_PATH", "").strip(),
         "chrome",
         r"C:\Program Files\Google\Chrome\Application\chrome.exe",
@@ -189,6 +213,16 @@ def _open_url_in_system_browser(url: str) -> dict:
     except Exception as e:
         return {"ok": False, "error": str(e)}
     return {"ok": False, "error": "cannot open system browser"}
+
+
+def _is_playwright_browser_missing_error(message: str) -> bool:
+    text = str(message or "").lower()
+    if not text:
+        return False
+    return (
+        "browsertype.launch" in text
+        and "executable doesn't exist" in text
+    ) or "playwright install" in text
 
 
 def _try_click_first(page, candidates: list[str], timeout_ms: int = 6000) -> bool:
@@ -504,6 +538,103 @@ def _read_default_proxy_from_config() -> str:
         return ""
 
 
+def _mask_card_number(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if "*" in text:
+        return text
+    digits = re.sub(r"\D", "", text)
+    if len(digits) >= 4:
+        return f"**** **** **** {digits[-4:]}"
+    return text
+
+
+def _normalize_payment_profile(item: dict) -> dict[str, str]:
+    exp_month = str(item.get("payment_card_exp_month") or item.get("exp_month") or "").strip()
+    exp_year = str(item.get("payment_card_exp_year") or item.get("exp_year") or "").strip()
+    expiry = str(item.get("payment_card_expiry") or item.get("expiry") or "").strip()
+    if not expiry and (exp_month or exp_year):
+        if exp_month and exp_year:
+            expiry = f"{exp_month.zfill(2)}/{exp_year[-2:] if len(exp_year) >= 2 else exp_year}"
+        else:
+            expiry = f"{exp_month}/{exp_year}".strip("/")
+
+    card_number_masked = _mask_card_number(
+        str(item.get("payment_card_number_masked") or item.get("card_number_masked") or "").strip()
+    )
+    if not card_number_masked:
+        card_number_masked = _mask_card_number(
+            str(item.get("payment_card_number") or item.get("card_number") or "").strip()
+        )
+
+    return {
+        "account": str(item.get("account") or item.get("email") or item.get("账号") or "").strip().lower(),
+        "cardholder_name": str(item.get("payment_cardholder_name") or item.get("cardholder_name") or item.get("name") or "").strip(),
+        "card_number_masked": card_number_masked,
+        "expiry": expiry,
+        "note": str(item.get("payment_card_note") or item.get("note") or item.get("备注") or "").strip(),
+    }
+
+
+def _load_payment_profiles_from_config(cfg: dict) -> list[dict[str, str]]:
+    raw = str(cfg.get("payment_profiles_json") or "").strip()
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return []
+    if not isinstance(data, list):
+        return []
+
+    profiles: list[dict[str, str]] = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        normalized = _normalize_payment_profile(item)
+        if normalized.get("account"):
+            profiles.append(normalized)
+    return profiles
+
+
+def _read_payment_profile_from_config(email: str = "") -> dict[str, str]:
+    try:
+        cfg_path = Path(__file__).with_name("config.json")
+        if not cfg_path.exists():
+            return {}
+        cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+        if not isinstance(cfg, dict):
+            return {}
+        email_text = str(email or "").strip().lower()
+        if email_text:
+            for item in _load_payment_profiles_from_config(cfg):
+                if item.get("account") == email_text:
+                    return item
+
+        return _normalize_payment_profile(cfg)
+    except Exception:
+        return {}
+
+
+def _format_manual_payment_profile_block(email: str = "") -> str:
+    profile = _read_payment_profile_from_config(email=email)
+    if not any(profile.values()):
+        return ""
+
+    lines = ["付款资料:"]
+    if profile.get("cardholder_name"):
+        lines.append(f"持卡人: {profile['cardholder_name']}")
+    if profile.get("card_number_masked"):
+        lines.append(f"卡号: {profile['card_number_masked']}")
+    if profile.get("expiry"):
+        lines.append(f"有效期: {profile['expiry']}")
+    lines.append("CVV: 请手动输入（不会写入日志）")
+    if profile.get("note"):
+        lines.append(f"备注: {profile['note']}")
+    return "\n".join(lines)
+
+
 def _read_optional_json(path_or_json: str, fallback: dict) -> dict:
     text = (path_or_json or "").strip()
     if not text:
@@ -783,6 +914,8 @@ def _auto_capture_stripe_from_checkout(
     checkout_session_id: str,
     storage_state_file: Path,
     max_wait_ms: int = 90000,
+    fallback_open_url: str = "",
+    log_tag: str = "",
 ) -> dict:
     launch_kwargs = {"headless": False, "args": _linux_launch_args()}
     pw_proxy = _normalize_playwright_proxy(proxy)
@@ -793,9 +926,16 @@ def _auto_capture_stripe_from_checkout(
     captures: list[dict] = []
     browser = None
     context = None
+    data_url = (
+        f"https://chatgpt.com/checkout/openai_llc/{checkout_session_id}.data"
+        "?_routes=routes%2Fcheckout.%24entity.%24checkoutId"
+    )
+    target = f"https://chatgpt.com/checkout/openai_llc/{checkout_session_id}"
+    manual_open_url = str(fallback_open_url or target).strip()
 
     try:
         with sync_playwright() as p:
+            _emit_project_log("info", log_tag, f"[subscription] 正在自动打开浏览器: {manual_open_url}")
             browser = p.chromium.launch(**launch_kwargs)
             if storage_state_file.exists():
                 context = browser.new_context(
@@ -854,12 +994,6 @@ def _auto_capture_stripe_from_checkout(
                     print(f"[warn] auto-capture failed: {e}")
 
             page.on("response", on_response)
-
-            data_url = (
-                f"https://chatgpt.com/checkout/openai_llc/{checkout_session_id}.data"
-                "?_routes=routes%2Fcheckout.%24entity.%24checkoutId"
-            )
-            target = f"https://chatgpt.com/checkout/openai_llc/{checkout_session_id}"
 
             print(f"[info] opening data route first: {data_url}")
             try:
@@ -923,10 +1057,15 @@ def _auto_capture_stripe_from_checkout(
                     break
 
                 print("[warn] wait timeout reached, payment not paid yet")
-                ans = input("[input] 继续等待支付完成? [Y/n]: ").strip().lower()
-                if ans in {"n", "no", "0"}:
-                    break
-                deadline = time.time() + max_wait_ms / 1000
+                return {
+                    "ok": True,
+                    "target": target,
+                    "latest": latest,
+                    "captures": captures,
+                    "final_url": page.url,
+                    "final_paid": False,
+                    "timed_out": True,
+                }
 
             return {
                 "ok": True,
@@ -937,6 +1076,24 @@ def _auto_capture_stripe_from_checkout(
                 "final_paid": _confirm_response_paid(latest.get("stripe_confirm")),
             }
     except Exception as e:
+        fallback_open_result = _open_url_in_system_browser(manual_open_url) if manual_open_url else {"ok": False, "error": "empty url"}
+        if fallback_open_result.get("ok"):
+            fallback_msg = (
+                f"[subscription] Playwright 自动打开失败，已回退系统浏览器: {manual_open_url}\n"
+                "请直接在打开的页面完成支付"
+            )
+            _emit_project_log("warning", log_tag, fallback_msg)
+            return {
+                "ok": True,
+                "target": target,
+                "latest": latest,
+                "captures": captures,
+                "final_paid": False,
+                "fallback_opened": True,
+                "fallback_open_url": manual_open_url,
+                "fallback_open_result": fallback_open_result,
+                "error": str(e),
+            }
         return {"ok": False, "error": str(e), "latest": latest, "captures": captures}
     finally:
         try:
@@ -1002,6 +1159,51 @@ def _extract_runtime_params(latest: dict[str, dict]) -> dict:
     }
 
 
+def _collect_runtime_capture_results(runtime_capture: dict, checkout_session_id: str) -> tuple[dict, dict, dict]:
+    latest = (runtime_capture.get("latest") or {}) if isinstance(runtime_capture, dict) else {}
+    runtime_params = _extract_runtime_params(latest if isinstance(latest, dict) else {})
+
+    pm_item = latest.get("stripe_payment_methods") if isinstance(latest, dict) else None
+    cf_item = latest.get("stripe_confirm") if isinstance(latest, dict) else None
+
+    if isinstance(pm_item, dict):
+        payment_method_result = {
+            "ok": True,
+            "url": pm_item.get("url"),
+            "status": pm_item.get("response_status"),
+            "request_headers": pm_item.get("request_headers"),
+            "request_body_raw": pm_item.get("request_body_raw"),
+            "response_headers": pm_item.get("response_headers"),
+            "response_body": pm_item.get("response_body"),
+        }
+    else:
+        payment_method_result = {"ok": False, "reason": "stripe_payment_methods not captured"}
+
+    if isinstance(cf_item, dict):
+        confirm_paid = _confirm_response_paid(cf_item)
+        confirm_body = _safe_json_loads(str(cf_item.get("response_body") or ""))
+        confirm_session_id = ""
+        if isinstance(confirm_body, dict):
+            confirm_session_id = str(confirm_body.get("session_id") or "").strip()
+        stripe_result = {
+            "ok": True,
+            "paid": confirm_paid,
+            "url": cf_item.get("url"),
+            "status": cf_item.get("response_status"),
+            "request_headers": cf_item.get("request_headers"),
+            "request_body_raw": cf_item.get("request_body_raw"),
+            "response_headers": cf_item.get("response_headers"),
+            "response_body": cf_item.get("response_body"),
+            "session_id": confirm_session_id,
+        }
+        if confirm_session_id and confirm_session_id != checkout_session_id:
+            print(f"[warn] session mismatch: checkout={checkout_session_id} runtime={confirm_session_id}")
+    else:
+        stripe_result = {"ok": False, "reason": "stripe_confirm not captured"}
+
+    return payment_method_result, stripe_result, runtime_params
+
+
 def _run_protocol_only(
     email: str,
     password: str,
@@ -1023,6 +1225,7 @@ def _run_protocol_only(
     existing_reg=None,
     existing_tokens: dict[str, Any] | None = None,
     open_stripe_hosted_url: bool = True,
+    log_tag: str = "",
 ):
     reg = existing_reg
     tokens = existing_tokens if isinstance(existing_tokens, dict) else None
@@ -1132,6 +1335,17 @@ def _run_protocol_only(
             print(f"[ok] protocol stripe_init status={init_resp.status_code}")
             if stripe_hosted_url:
                 print(f"[ok] stripe hosted url: {stripe_hosted_url}")
+                if not skip_runtime_capture:
+                    payment_profile_block = _format_manual_payment_profile_block(email=email)
+                    manual_msg = (
+                        f"[subscription] 待人工付款: {email}\n"
+                        f"ChatGPT 支付页: {checkout_url}\n"
+                        f"Stripe 直达: {stripe_hosted_url}\n"
+                        f"说明: 浏览器将自动打开支付页；如未自动打开，请点击上方链接继续"
+                    )
+                    if payment_profile_block:
+                        manual_msg = f"{manual_msg}\n{payment_profile_block}"
+                    _emit_project_log("warning", log_tag, manual_msg)
                 if not open_stripe_hosted_url:
                     print("[info] skip opening stripe hosted url (open_stripe_hosted_url=false)")
                 elif (stripe_open_mode or "").strip().lower() == "system":
@@ -1163,53 +1377,16 @@ def _run_protocol_only(
                 checkout_session_id=checkout_session_id,
                 storage_state_file=browser_state_file,
                 max_wait_ms=max_wait_ms,
+                fallback_open_url=stripe_hosted_url or checkout_url,
+                log_tag=log_tag,
+            )
+            payment_method_result, stripe_result, runtime_params = _collect_runtime_capture_results(
+                runtime_capture=runtime_capture,
+                checkout_session_id=checkout_session_id,
             )
         else:
             payment_method_result = {"ok": False, "reason": "skipped (--skip-runtime-capture)"}
             stripe_result = {"ok": False, "reason": "skipped (--skip-runtime-capture)"}
-
-            latest = (runtime_capture.get("latest") or {}) if isinstance(runtime_capture, dict) else {}
-            runtime_params = _extract_runtime_params(latest if isinstance(latest, dict) else {})
-
-            pm_item = latest.get("stripe_payment_methods") if isinstance(latest, dict) else None
-            cf_item = latest.get("stripe_confirm") if isinstance(latest, dict) else None
-
-            if isinstance(pm_item, dict):
-                payment_method_result = {
-                    "ok": True,
-                    "url": pm_item.get("url"),
-                    "status": pm_item.get("response_status"),
-                    "request_headers": pm_item.get("request_headers"),
-                    "request_body_raw": pm_item.get("request_body_raw"),
-                    "response_headers": pm_item.get("response_headers"),
-                    "response_body": pm_item.get("response_body"),
-                }
-            else:
-                payment_method_result = {"ok": False, "reason": "stripe_payment_methods not captured"}
-
-            if isinstance(cf_item, dict):
-                confirm_paid = _confirm_response_paid(cf_item)
-                confirm_body = _safe_json_loads(str(cf_item.get("response_body") or ""))
-                confirm_session_id = ""
-                if isinstance(confirm_body, dict):
-                    confirm_session_id = str(confirm_body.get("session_id") or "").strip()
-                stripe_result = {
-                    "ok": True,
-                    "paid": confirm_paid,
-                    "url": cf_item.get("url"),
-                    "status": cf_item.get("response_status"),
-                    "request_headers": cf_item.get("request_headers"),
-                    "request_body_raw": cf_item.get("request_body_raw"),
-                    "response_headers": cf_item.get("response_headers"),
-                    "response_body": cf_item.get("response_body"),
-                    "session_id": confirm_session_id,
-                }
-                if not confirm_paid:
-                    print("[warn] stripe_confirm captured but not paid yet; complete challenge in browser")
-                if confirm_session_id and confirm_session_id != checkout_session_id:
-                    print(f"[warn] session mismatch: checkout={checkout_session_id} runtime={confirm_session_id}")
-            else:
-                stripe_result = {"ok": False, "reason": "stripe_confirm not captured"}
 
     result = {
         "mode": "protocol_only",
@@ -1253,9 +1430,14 @@ def run_registered_account_flow(
     browser_state_file = output_base / f"{stem}_browser_state.json"
     log_tag = str(tag or stem)
 
-    start_msg = f"[post-checkout] 开始执行 test.py 自动链路: {email}"
-    print(start_msg)
-    _emit_project_log("info", log_tag, start_msg)
+    start_msg = f"[subscription] 开始创建支付链路: {email}"
+    _print_and_log("info", log_tag, start_msg)
+
+    lock_acquired = _manual_checkout_lock.acquire(blocking=False)
+    if not lock_acquired:
+        wait_msg = f"[subscription] 等待付款队列: {email}"
+        _print_and_log("warning", log_tag, wait_msg)
+        _manual_checkout_lock.acquire()
 
     try:
         result = _run_protocol_only(
@@ -1274,23 +1456,31 @@ def run_registered_account_flow(
             browser_state_file=browser_state_file,
             no_auth_cache=True,
             refresh_auth=False,
-            skip_runtime_capture=True,
+            skip_runtime_capture=False,
             stripe_open_mode="system",
             existing_reg=existing_reg,
             existing_tokens=existing_tokens,
             open_stripe_hosted_url=False,
+            log_tag=log_tag,
         )
     except Exception as e:
-        error_msg = f"[post-checkout] test.py 自动链路异常: {e}"
-        print(error_msg)
-        _emit_project_log("error", log_tag, error_msg)
-        return {"ok": False, "output": str(out_file), "error": str(e)}
+        error_msg = f"[subscription] 订阅失败: {e}"
+        _print_and_log("error", log_tag, error_msg)
+        return {"ok": False, "status": "failed", "output": str(out_file), "error": str(e)}
+    finally:
+        _manual_checkout_lock.release()
 
     issues: list[str] = []
     checkout_result = result.get("checkout_result") if isinstance(result, dict) else {}
     stripe_init_result = result.get("stripe_init_result") if isinstance(result, dict) else {}
+    runtime_capture = result.get("runtime_capture") if isinstance(result, dict) else {}
+    stripe_confirm_result = result.get("stripe_confirm_result") if isinstance(result, dict) else {}
     checkout_status = int((checkout_result or {}).get("status") or 0)
     stripe_init_status = int((stripe_init_result or {}).get("status") or 0)
+    runtime_capture_ok = bool((runtime_capture or {}).get("ok"))
+    runtime_capture_error = str((runtime_capture or {}).get("error") or (runtime_capture or {}).get("reason") or "").strip()
+    playwright_browser_missing = _is_playwright_browser_missing_error(runtime_capture_error)
+    subscription_paid = bool((stripe_confirm_result or {}).get("paid"))
 
     if not (checkout_result or {}).get("ok") or not 200 <= checkout_status < 300:
         issues.append(f"checkout_status={checkout_status or 'unknown'}")
@@ -1298,17 +1488,37 @@ def run_registered_account_flow(
         issues.append(f"stripe_init_status={stripe_init_status or 'unknown'}")
     if not str(result.get("stripe_hosted_url") or "").strip():
         issues.append("stripe_hosted_url_missing")
+    if not runtime_capture_ok and not playwright_browser_missing:
+        issues.append(runtime_capture_error or "runtime_capture_failed")
 
     if issues:
-        error_msg = f"[post-checkout] test.py 自动链路失败: {', '.join(issues)} | 输出: {out_file}"
-        print(error_msg)
-        _emit_project_log("error", log_tag, error_msg)
-        return {"ok": False, "output": str(out_file), "issues": issues, "result": result}
+        error_msg = f"[subscription] 订阅失败: {', '.join(issues)} | 输出: {out_file}"
+        _print_and_log("error", log_tag, error_msg)
+        return {"ok": False, "status": "failed", "output": str(out_file), "issues": issues, "result": result}
 
-    done_msg = f"[post-checkout] test.py 自动链路完成: {out_file}"
-    print(done_msg)
-    _emit_project_log("info", log_tag, done_msg)
-    return {"ok": True, "output": str(out_file), "result": result}
+    if subscription_paid:
+        done_msg = f"[subscription] 订阅成功: {email} | 输出: {out_file}"
+        _print_and_log("success", log_tag, done_msg)
+        return {"ok": True, "status": "success", "output": str(out_file), "result": result}
+
+    if playwright_browser_missing:
+        install_msg = (
+            "[subscription] Playwright 浏览器未安装，已降级为人工付款链接模式\n"
+            "如需恢复自动拉起受控浏览器，可执行: python3 -m playwright install chromium"
+        )
+        _print_and_log("warning", log_tag, install_msg)
+
+    payment_profile_block = _format_manual_payment_profile_block(email=email)
+    pending_msg = (
+        f"[subscription] 待人工付款: {email}\n"
+        f"ChatGPT 支付页: {result.get('checkout_url') or '-'}\n"
+        f"Stripe 直达: {result.get('stripe_hosted_url') or '-'}\n"
+        f"输出文件: {out_file}"
+    )
+    if payment_profile_block:
+        pending_msg = f"{pending_msg}\n{payment_profile_block}"
+    _print_and_log("warning", log_tag, pending_msg)
+    return {"ok": False, "status": "pending", "output": str(out_file), "result": result}
 
 
 def _body_to_bytes(body) -> bytes:

@@ -30,6 +30,15 @@ export interface Config {
   sub2api_skip_default_group_bind: boolean
   sub2api_auto_group_bind: boolean
   sub2api_group_id: number
+  payment_cardholder_name: string
+  payment_card_number_masked: string
+  payment_card_expiry: string
+  payment_card_note: string
+  payment_card_number: string
+  payment_card_exp_month: string
+  payment_card_exp_year: string
+  payment_card_cvc: string
+  payment_profiles_json: string
 }
 
 export interface TaskStatus {
@@ -39,6 +48,11 @@ export interface TaskStatus {
   start_time: string | null
   success_count: number
   fail_count: number
+  register_success_count?: number
+  register_fail_count?: number
+  subscription_success_count?: number
+  subscription_fail_count?: number
+  subscription_pending_count?: number
   total_target: number
   container_target?: number
   container_running?: number
@@ -47,7 +61,7 @@ export interface TaskStatus {
 
 export interface LogEntry {
   timestamp: string
-  level: 'info' | 'success' | 'error'
+  level: 'info' | 'success' | 'error' | 'warning'
   tag: string
   message: string
 }

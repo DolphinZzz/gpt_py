@@ -2261,7 +2261,7 @@ def _register_one(idx, total, proxy, output_file):
             print(f"\n[OK] [{tag}] {email} 注册成功!")
         if _log_callback:
             try:
-                _log_callback("success", tag or str(idx), f"{email} 注册成功")
+                _log_callback("success", tag or str(idx), f"[register] 注册成功: {email}")
             except Exception:
                 pass
 
@@ -2277,7 +2277,11 @@ def _register_one(idx, total, proxy, output_file):
                 tokens=tokens if isinstance(tokens, dict) else None,
             )
             if not bool((post_result or {}).get("ok")):
-                reg._print("[post] test.py 自动链路失败，已记录日志并继续")
+                post_status = str((post_result or {}).get("status") or "").strip().lower()
+                if post_status == "pending":
+                    reg._print("[post] 订阅待人工付款，注册结果已保留")
+                else:
+                    reg._print("[post] 订阅失败，注册结果已保留")
         except Exception as post_exc:
             post_msg = f"test.py 自动链路异常: {post_exc}"
             reg._print(f"[post] {post_msg}")
@@ -2296,7 +2300,7 @@ def _register_one(idx, total, proxy, output_file):
             traceback.print_exc()
         if _log_callback:
             try:
-                _log_callback("error", str(idx), f"注册失败: {error_msg}")
+                _log_callback("error", str(idx), f"[register] 注册失败: {error_msg}")
             except Exception:
                 pass
         return False, None, error_msg
@@ -2371,7 +2375,7 @@ def run_batch(total_accounts: int = 3, output_file="registered_accounts.txt",
 
     elapsed = time.time() - start_time
     avg = elapsed / total_accounts if total_accounts else 0
-    summary = f"注册完成! 耗时 {elapsed:.1f}s | 总数: {total_accounts} | 成功: {success_count} | 失败: {fail_count}"
+    summary = f"注册完成! 耗时 {elapsed:.1f}s | 总数: {total_accounts} | 注册成功: {success_count} | 注册失败: {fail_count}"
     print(f"\n{'#'*60}")
     print(f"  {summary}")
     print(f"  平均速度: {avg:.1f} 秒/个")

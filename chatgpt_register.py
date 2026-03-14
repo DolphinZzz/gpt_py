@@ -38,6 +38,8 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 MAILBOX_QUERY_TOKEN_SECRET_FILE = os.path.join(SCRIPT_DIR, ".mailbox_query_token_secret")
 _mailbox_query_token_secret_cache = None
 _mailbox_query_token_secret_lock = threading.Lock()
+MAILBOX_LOCAL_PART_CHARS = string.ascii_lowercase + string.digits
+MAILBOX_LOCAL_PART_LENGTH = 5
 
 # ================= 加载配置 =================
 def _load_config():
@@ -46,7 +48,7 @@ def _load_config():
         "total_accounts": 3,
         "resend_api_base": "https://api.resend.com",
         "resend_api_key": "",
-        "resend_domain": "",
+        "resend_domain": "team.bcol.cc",
         "proxy": "",
         "output_file": "registered_accounts.txt",
         "enable_oauth": True,
@@ -105,6 +107,10 @@ def _normalize_resend_domain(value) -> str:
 
 def _is_resend_managed_domain(domain: str) -> bool:
     return str(domain or "").strip().lower().endswith(".resend.app")
+
+
+def _generate_mailbox_local_part(length: int = MAILBOX_LOCAL_PART_LENGTH) -> str:
+    return "".join(random.choice(MAILBOX_LOCAL_PART_CHARS) for _ in range(max(1, int(length or 0))))
 
 
 def _urlsafe_b64encode(data: bytes) -> str:
@@ -246,7 +252,7 @@ if not RESEND_API_KEY:
 if not RESEND_DOMAIN:
     print("⚠️ 警告: 未设置 RESEND_DOMAIN，请在 config.json 中设置或设置环境变量")
     print("   文件: config.json -> resend_domain")
-    print("   环境变量: export RESEND_DOMAIN='ilkoxpra.resend.app'")
+    print("   环境变量: export RESEND_DOMAIN='team.bcol.cc'")
 
 # 全局线程锁
 _print_lock = threading.Lock()
@@ -863,9 +869,7 @@ def create_temp_email():
         raise Exception("RESEND_DOMAIN 未设置，无法生成接收邮箱地址")
     _ensure_resend_receiving_access(_create_resend_session, _DEFAULT_IMPERSONATE)
 
-    chars = string.ascii_lowercase + string.digits
-    local_length = random.randint(10, 16)
-    email_local = "".join(random.choice(chars) for _ in range(local_length))
+    email_local = _generate_mailbox_local_part()
     email = f"{email_local}@{RESEND_DOMAIN}"
     created_at = time.time()
     mail_token = {
@@ -1136,9 +1140,7 @@ class ChatGPTRegister:
             raise Exception("RESEND_DOMAIN 未设置，无法生成接收邮箱地址")
         _ensure_resend_receiving_access(self._create_mail_session, self.impersonate)
 
-        chars = string.ascii_lowercase + string.digits
-        length = random.randint(10, 16)
-        email_local = "".join(random.choice(chars) for _ in range(length))
+        email_local = _generate_mailbox_local_part()
         email = f"{email_local}@{RESEND_DOMAIN}"
         created_at = time.time()
         return email, "", {
@@ -2311,8 +2313,8 @@ def main():
     if not RESEND_API_KEY or not RESEND_DOMAIN:
         print("\n⚠️  警告: 未设置完整的 Resend 接收配置")
         print("   请编辑 config.json 设置 resend_api_key / resend_domain，或设置环境变量:")
-        print("   Windows: set RESEND_API_KEY=re_xxx && set RESEND_DOMAIN=ilkoxpra.resend.app")
-        print("   Linux/Mac: export RESEND_API_KEY='re_xxx' && export RESEND_DOMAIN='ilkoxpra.resend.app'")
+        print("   Windows: set RESEND_API_KEY=re_xxx && set RESEND_DOMAIN=team.bcol.cc")
+        print("   Linux/Mac: export RESEND_API_KEY='re_xxx' && export RESEND_DOMAIN='team.bcol.cc'")
         print("\n   按 Enter 继续尝试运行 (可能会失败)...")
         input()
 

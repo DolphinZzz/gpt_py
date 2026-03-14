@@ -2,7 +2,7 @@
   "total_accounts": 3,
   "resend_api_base": "https://api.resend.com",
   "resend_api_key": "re_pyQPaAcY_Lkn4waUMLr977UdpJSdbKZMD",
-  "resend_domain": "ilkoxpra.resend.app",
+  "resend_domain": "team.bcol.cc",
   "proxy": "",
   "output_file": "registered_accounts.txt",
   "enable_oauth": true,

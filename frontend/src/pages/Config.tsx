@@ -81,8 +81,8 @@ export default function Config() {
           <Form.Item label="API Key" name="resend_api_key" tooltip="必须是可读取 Receiving API 的 key；只允许发信的 key 无法拉取验证码邮件">
             <Input.Password />
           </Form.Item>
-          <Form.Item label="接收域名" name="resend_domain" tooltip="可填自定义收件域名，或 Resend 托管域如 ilkoxpra.resend.app；如果是自定义域，需先完成 Receiving DNS/MX 配置">
-            <Input placeholder="例如: ilkoxpra.resend.app" />
+          <Form.Item label="接收域名" name="resend_domain" tooltip="默认使用 team.bcol.cc；如果改成其他自定义收件域名，需先完成 Receiving DNS/MX 配置">
+            <Input placeholder="例如: team.bcol.cc" />
           </Form.Item>
         </Card>
 

@@ -101,7 +101,7 @@ class ConfigModel(BaseModel):
     total_accounts: int = 3
     resend_api_base: str = "https://api.resend.com"
     resend_api_key: str = ""
-    resend_domain: str = ""
+    resend_domain: str = "team.bcol.cc"
     proxy: str = ""
     output_file: str = "registered_accounts.txt"
     enable_oauth: bool = True
